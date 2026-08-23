@@ -17,12 +17,20 @@ Status as of this document's creation: **all 15 decisions are OPEN.**
 - **Resolution:** _none_
 
 ## DD-2 — Urgency signal & target chain
-- **Status:** OPEN
+- **Status:** ✅ RESOLVED — 2026-08-23
 - **Alternatives:** (a) priority-fee tax on a priority-ordered L2 (e.g., OP-Stack: Unichain, Base, OP Mainnet, Blast); (b) flat/state-based fee, required if targeting L1.
 - **PRD section(s):** §2.3, §4.1
 - **Coupled to:** DD-1, DD-8; also determines the Fast-Lane sandwich-resistance profile (§7.5)
 - **PRD notes:** Not a cosmetic choice — the two modes have opposite sandwich-resistance properties (§7.5) and the priority-fee tax is stated to "likely not work at all on Ethereum L1" (Paradigm). Whichever is chosen, the target chain's `tx.gasprice - block.basefee` semantics must be verified to match the sequencer's actual ordering rule before relying on it.
-- **Resolution:** _none_
+- **Resolution:** **Alternative (a) — priority-fee MEV tax. Deployment target chain: Base** (OP-Stack, priority-ordered). Decided by project owner, 2026-08-23.
+  - **Fee form:** `tax = k · TAXED_GAS · (tx.gasprice − block.basefee)`, monotonic in priority fee (satisfies I12), sandwich-resistant in proportion to `k` (§7.5 tax mode).
+  - **Rationale:** On a priority-ordered OP-Stack chain the sequencer orders by priority fee, making the tax a sound urgency signal. On Ethereum L1 competitive builders maximize block value rather than honoring strict priority order, so the tax "would likely not work at all" (Paradigm); the Fast Lane would fall back to a flat/state-based fee and become fully sandwichable — a materially different mechanism.
+  - **Assumption:** deployment stays on Base or another OP-Stack priority-ordered chain (Unichain, OP Mainnet). Moving to L1 reopens this decision.
+
+  **⚠️ Flags recorded at resolution time — not objections, but they must not be lost:**
+  1. **Two supporting claims in the submitted rationale are Unichain-specific and do not transfer to Base.** The rationale cites (i) a TEE enforcing priority ordering with public attestations, and (ii) blocks rarely reaching capacity so the "complete block" edge case is minor. Both describe Unichain. Base's ordering guarantee is operational (sequencer policy), not TEE-attested, and Base has historically seen more congestion than Unichain — so the full-block edge case (proposers dropping low-priority txs) carries **more** weight on Base, not less. The choice of (a) still holds on Base; the strength of the A3 trust assumption is simply different from what the rationale describes.
+  2. **A3 verification is now a concrete, required task, not a formality.** PRD §2.3 carries a hard `[CONSTRAINT]` that the implementation verify on the *specific* target chain that `tx.gasprice − block.basefee` equals the component the sequencer actually orders on. That must be done against Base (PRD §15 scenario 10, fork test) before the Fast Lane is trusted.
+  3. **`TAXED_GAS` implies a size-dependent fee rate, which touches an open question.** The tax is dimensionally an *absolute* amount (wei), while v4's dynamic-fee override takes a *rate* (`uint24`, hundredths of a bip). Converting requires dividing by swap size, which makes `g` depend on `size` — that is exactly the unresolved `g()`-signature question in `docs/OPEN-QUESTIONS.md` §3.2. Resolving DD-2 this way appears to answer it in the affirmative, but that has **not** been explicitly decided and is not treated as decided here. Monotonicity in priority fee (I12) holds either way at fixed size.
 
 ## DD-3 — Fast→Slow fee subsidy
 - **Status:** OPEN

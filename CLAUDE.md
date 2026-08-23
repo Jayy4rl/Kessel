@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Kessel is currently **spec-only** — there is no smart-contract code, build tooling, or test suite in this repo yet. The entire technical design lives in `docs/PRD.md`. docs/PRD.md is the canonical protocol specification. Read the sections relevant to the current task before implementation. For protocol-level or architectural changes, read the PRD broadly enough to identify cross-section dependencies and invariants. Do not rely on partial recall when a requirement is ambiguous; inspect the source document. Do not load the entire PRD into context for routine, localized implementation tasks unless necessary. Prefer the smallest relevant set of documentation needed to make a correct decision.
+Kessel is **scaffolded but not implemented** (Phase 0 complete, 2026-08-22). There is a Foundry project with dependencies, CI, and a test harness, but **no protocol code yet** — `src/` contains only a layout plan. The entire technical design lives in `docs/PRD.md`. docs/PRD.md is the canonical protocol specification. Read the sections relevant to the current task before implementation. For protocol-level or architectural changes, read the PRD broadly enough to identify cross-section dependencies and invariants. Do not rely on partial recall when a requirement is ambiguous; inspect the source document. Do not load the entire PRD into context for routine, localized implementation tasks unless necessary. Prefer the smallest relevant set of documentation needed to make a correct decision.
 
 ## What Kessel is
 
@@ -31,4 +31,28 @@ Twelve invariants (I1–I12) must hold in code and are the basis for the require
 
 ## Commands
 
-No build, lint, or test tooling exists yet (no Foundry/Hardhat config, no package manifest). When implementation begins, add the actual build/test/lint commands here rather than assuming a toolchain.
+Foundry project. Solidity 0.8.26, `cancun` EVM target, dependencies as git submodules under `lib/`.
+
+```bash
+forge build                      # compile (fast dev profile: via_ir off)
+forge test                       # full suite
+forge test --match-path 'test/scaffold/*'   # scaffold/characterization tests
+forge fmt                        # format; `forge fmt --check` in CI
+forge test --gas-report          # gas profiling
+
+FOUNDRY_PROFILE=optimized forge build   # production settings (via_ir, 44444444 runs)
+FOUNDRY_PROFILE=lite forge test         # fastest loop, low fuzz counts
+FOUNDRY_PROFILE=ci forge test           # high fuzz/invariant counts
+```
+
+After a fresh clone: `git submodule update --init --recursive` (dependencies nest — `uniswap-hooks` and `v4-core` are submodules of `v4-periphery`).
+
+**Do not change compiler settings in the `optimized` profile after the hook address is mined.** The CREATE2 address is derived from creation bytecode, which depends on those settings, and the address encodes the permission bitmap.
+
+### Test layout
+
+- `test/scaffold/` — characterization tests pinning upstream v4 behaviour the design depends on (fee flags, hook-address validity rules, `donate()` empty-range revert, priority-fee arithmetic). These guard against silent upstream drift; if one fails after a dependency bump, a design assumption has changed.
+- `test/invariant/Invariants.t.sol` — stubs for all twelve invariants, each `vm.skip`ped with the phase that unblocks it. `forge test` output is a live checklist. **Do not delete a stub to tidy the output**; replace the skip with a real assertion when its phase lands.
+- `test/utils/KesselTestBase.sol` — shared fixture over v4-core's `Deployers`.
+
+**Do not stage changes or attempt to commit to github**
