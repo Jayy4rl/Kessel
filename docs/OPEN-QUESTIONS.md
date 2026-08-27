@@ -6,6 +6,102 @@ This file consolidates everything that cannot be settled by reading the PRD more
 
 ---
 
+## Status — 2026-08-25
+
+**§1 (the 15 design decisions): all answered, none by a human.** DD-2 was resolved by the project owner on 2026-08-23. DD-1 and DD-3…DD-15 were resolved on 2026-08-25 by the implementation agent under an explicit owner directive to research each one and record the decision and its rationale in `docs/DECISIONS.md` before implementing it. That directive supersedes this file's "stop and get a decision" rule for that work — it does **not** retire the rule, and it does not make the answers reviewed. Read `docs/DECISIONS.md` as *decisions taken and argued*, not as *decisions ratified*. The questions below are left standing rather than struck out, because what this file is for is telling a human what they still need to look at, and all fifteen still qualify.
+
+**§3 (gaps in the control documents): 3.1 and 3.4 acted on, 3.2 and 3.3 answered.**
+- §3.1 — DD-6 and DD-7 were resolved jointly, as this file recommended.
+- §3.2 — `g`'s signature: answered **priority-fee-only**, no size- or state-dependence. The reasoning is in DD-4. The short version: §4.1's calibration target ("~90% of the marginal searcher bid") is an absolute wei amount, v4's fee override takes a rate, and converting between them needs a price for the input token — which §9 forbids. `k` is therefore defined directly as a rate, `taxRate = k · priorityFee / 1 gwei`, and `size`/`poolState` do not enter. I12 holds unconditionally rather than only at fixed size. **This is a real departure from §4.1's calibration and is flagged as such inside DD-4.**
+- §3.3 — DD-15's two axes were answered separately, as this file asked: representation is a **storage record**, redemption is **pull**.
+- §3.4 — DD-8 was re-checked against DD-3 and DD-10 before being frozen. The outcome is that `afterSwap` is needed for *settlement timing*, not for fee routing: the Fast-Lane premium reaches LPs through the dynamic-fee override alone, and v4 credits it inside `Pool.swap`. The bitmap is frozen and pinned by `KESSEL_FLAGS` in `test/utils/KesselTestBase.sol`.
+
+**§4 (validation work): all three still open.** A3 is the one now closest to blocking — PRD §2.3 makes it a hard constraint and §15 scenario 10 asks for a Base fork test, which needs an RPC endpoint that is not configured.
+
+**The four reconnaissance findings are resolved** and implemented: trader identity travels in `hookData` (DD-15); `f_slow` is charged explicitly at settlement with the pool's stored LP fee left at 0 (DD-3); the I9 warehouse cap is per currency in its own units, because a common numeraire needs the oracle §9 forbids; and I1 is written against the hook's own deltas.
+
+### New since implementation — please review
+
+1. **Three resolutions depart from a PRD recommendation, and one is stricter than the PRD permits.** DD-4 (rate not wei), DD-5 (average not marginal clearing price), DD-11 (the PRD's recommended refund-on-violation is argued to be *unsound*, not merely simpler), and DD-7 (declines the keeper reimbursement §6.3 allows). Each is argued in place. DD-5 and DD-11 are the two where being wrong changes settlement's core loop.
+2. **`k` cannot be validated by any test.** Its default is a placeholder, not a calibration. See the DD-4 risk note in `docs/DEVELOPMENT-LOG.md`.
+3. **Five security-review amendments (SR-1…SR-5)** changed protocol-visible behaviour after the implementation was complete — most consequentially SR-3, which makes a trader's stated `expiryEpochs` a floor on how long an order rests rather than an exact deadline. All five are in `docs/DECISIONS.md`.
+
+---
+
+## Status — 2026-08-26 (economic & assumption review)
+
+The implementation review is closed. This pass covered what a green test suite
+cannot: static analysis, the economics, and the assumptions. **Nothing below is
+ratified, and no open item has been retired.**
+
+### Newly blocking
+
+1. **DD-5 is BLOCKING and must not be ratified as it stands.** `docs/DD5-SIMULATION.md`
+   reports an adversarial simulation run against the real contracts
+   (`test/economic/DD5Manipulation.t.sol`). Result: sandwiching the settlement
+   residual is profitable at every governance-reachable `k` once the un-netted
+   residual exceeds roughly 30–50 bps of pool depth, by 20×–370× the tax at the
+   default `k`. Netting is a **complete** defence on the matched portion
+   (extraction exactly zero at zero residual) and **no** defence on the residual,
+   which measures at ~100% of a plain-CPAMM sandwich — about 2× the
+   malicious-batch-operator half-bound. The tax cannot be made to bind: extraction
+   is quadratic in the residual while the tax is linear in the attacker's size,
+   and `MAX_FAST_FEE` is a deploy-fixed constant that saturates it. The bound that
+   *does* bind is trader limit slack (I8 working as designed). Four options for
+   closing it are outlined in that document; **none is implemented**, because
+   each is a change to settlement's core loop. **Owner decision required.**
+
+2. **Settlement gas has an unpriced incidence.** Measured in
+   `test/economic/SettlementGasIncidence.t.sol`: carrying a 32-order batch costs
+   the triggering Fast-Lane trader +1,120,644 gas over an uncarried swap, with no
+   reimbursement (DD-7 declined PRD §6.3's permission). Absolutely small on Base,
+   but **regressive** — 338% of the LP fee paid on a 0.001 ETH swap, 32% at
+   0.01 ETH, 3% at 0.1 ETH. It lands hardest on the small retail flow the A1
+   thesis depends on attracting, and appears nowhere in the PRD's Fast-Lane
+   pricing. Not a defect; a disclosure gap. **Owner decision: price it, cap it
+   further, or document it.**
+
+3. **The shipped `k = 500` is roughly 3–30× above what either published anchor
+   implies.** `test/economic/KCalibration.t.sol` establishes that the capture
+   fraction is `k·S/(1e15·G)` — *independent of the priority fee*, inversely
+   proportional to swap size. At `k = 500` and 200,000 gas, a 1 ETH swap is taxed
+   at 2,500% of the marginal bid. The 90%-capture `k` for that swap is 180; for a
+   10 ETH swap, 18. This does not make `k = 500` wrong — it makes it a
+   placeholder that has now been shown to be badly placed. **Blocked on flow
+   data; see §4 below.**
+
+### Resolved or discharged this pass
+
+- **SR-3 floor semantics analysed and the rationale recorded** (see SR-3 in
+  `docs/DECISIONS.md`). I8 is unaffected by the extension — eligibility never
+  mentions time — and the extension moves DD-9's free-option balance toward the
+  protocol. One asymmetry is flagged there for an owner call: the block floor is
+  anchored to when the *batch* opened, not when the *order* was submitted.
+  Regression tests: `test_SR3_fillAfterTheStatedDeadlineStillHonoursTheLimit`,
+  `test_SR3_extensionWindowIsNotAnExit`.
+- **Slither 0.11.6 run and fully triaged.** No high findings. Two real mediums,
+  both fixed with regression tests first: **SR-6** (settlement running underneath
+  an in-flight redemption — permanent fund loss on any ETH-quoted pool) and
+  **SR-7** (`governance` settable to `address(0)` on a contract with no recovery
+  path). Both are in `docs/DECISIONS.md`.
+- **A load-bearing upstream assumption was undocumented and is now pinned.** v4
+  skips a hook's own callbacks when the hook is the caller, which is the only
+  reason the settlement residual is not charged the Fast Lane's urgency tax.
+  `test/scaffold/Scaffold.t.sol::test_hookCallbacksAreSkippedWhenTheHookItselfSwaps`.
+- **PRD ↔ code divergences enumerated** in `docs/PRD-RECONCILIATION.md`. The PRD
+  is not edited; the list is for the owner to apply.
+
+### Still blocked on the owner
+
+- **A3 fork test is written and ready to run.** `test/fork/A3PriorityOrdering.t.sol`
+  skips loudly without an endpoint and its offline self-checks (JSON parsing,
+  ordering analysis) pass, so the first real run measures A3 rather than debugging
+  the file. **Needs: a Base mainnet ARCHIVE RPC endpoint in `BASE_RPC_URL`.**
+- **`k` calibration is blocked on flow data.** The harness is built and the data
+  request is written into `test_DD4_whatDataIsNeeded` so it cannot be lost.
+
+---
+
 ## A note on "recommendations" in the PRD
 
 Many `[OPEN]` items in the PRD are followed by a sentence like "recommend (a) for v1" or "(a) is the simplest defensible choice." These are the PRD author's opinion on which alternative is easiest to ship, not a decision — the PRD is explicit elsewhere that `[OPEN]` items are never protocol requirements. The risk this document exists partly to guard against: an implementer (human or agent) reads a strong, confident recommendation next to an `[OPEN]` tag and quietly treats it as settled. Every question below states the PRD's recommendation where one exists, but flags it as **non-binding** — someone with actual authority over this project has to make the call.

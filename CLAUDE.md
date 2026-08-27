@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Kessel is **scaffolded but not implemented** (Phase 0 complete, 2026-08-22). There is a Foundry project with dependencies, CI, and a test harness, but **no protocol code yet** — `src/` contains only a layout plan. The entire technical design lives in `docs/PRD.md`. docs/PRD.md is the canonical protocol specification. Read the sections relevant to the current task before implementation. For protocol-level or architectural changes, read the PRD broadly enough to identify cross-section dependencies and invariants. Do not rely on partial recall when a requirement is ambiguous; inspect the source document. Do not load the entire PRD into context for routine, localized implementation tasks unless necessary. Prefer the smallest relevant set of documentation needed to make a correct decision.
+Kessel is **implemented and tested, not reviewed by a human** (2026-08-25). `src/` holds `KesselHook.sol` plus three pure libraries (`lanes/LaneCodec.sol`, `lanes/FastLaneFee.sol`, `settle/Clearing.sol`); `src/README.md` maps each design decision to its home. 103 tests pass, including all twelve invariants as real stateful assertions. `docs/PRD.md` remains the canonical spec. docs/PRD.md is the canonical protocol specification. Read the sections relevant to the current task before implementation. For protocol-level or architectural changes, read the PRD broadly enough to identify cross-section dependencies and invariants. Do not rely on partial recall when a requirement is ambiguous; inspect the source document. Do not load the entire PRD into context for routine, localized implementation tasks unless necessary. Prefer the smallest relevant set of documentation needed to make a correct decision.
 
 ## What Kessel is
 
@@ -15,7 +15,13 @@ Kessel is a Uniswap v4 hook implementing a two-lane execution mechanism on a sin
 
 The economic point: letting traders self-select lane by urgency (a screening/price-discrimination mechanism) lets LPs capture the immediacy premium that a single static fee cannot price correctly. The mechanism prices *immediacy*, not *toxicity* — it does not claim to eliminate adverse selection or LVR, only to reallocate the immediacy premium to LPs and make the Slow Lane sandwich-proof. See PRD §1–§2 for the full framing; do not compress or restate this distinction incorrectly when explaining the design.
 
-## Before implementing: unresolved design decisions
+## Before implementing: the design decisions are resolved but unratified
+
+**All 15 DDs are now RESOLVED in `docs/DECISIONS.md`, and only DD-2 was resolved by a human.** DD-1 and DD-3…DD-15 were resolved on 2026-08-25 by an implementation agent under an explicit owner directive to research and record each one before implementing it. Read them as *decisions taken and argued*, not as *decisions ratified* — they remain subject to owner review and reversal, and `docs/OPEN-QUESTIONS.md` lists which ones most warrant a second look (DD-4, DD-5 and DD-11 above all). Five later amendments (SR-1…SR-5), driven by the security review, changed protocol-visible behaviour after the fact and are recorded in the same file.
+
+Do not re-resolve a DD, and do not treat one as unsettled because the register's own standing rule says only a human may resolve it. If you disagree with a resolution, say so and ask — do not quietly implement something else.
+
+The original framing follows, because it still governs anything newly discovered to be open:
 
 PRD §20 (Design Decisions Register) lists 15 decisions — DD-1 through DD-15 — that the spec *deliberately* leaves to the implementer (e.g. default lane when `hookData` is empty, the urgency-signal/target-chain choice, the Slow-Lane clearing-price definition P which the PRD calls the single highest-priority open item, settlement cadence/trigger, and the `afterSwap` permission). Do not silently default any of these while writing code. Before implementing a feature that touches an open DD, check whether it has since been resolved (look for a decision recorded in the repo or ask the user) rather than guessing — the PRD explicitly says `[OPEN]` items are never protocol requirements and must not be conflated with `[REQUIRED]` ones.
 
@@ -52,7 +58,10 @@ After a fresh clone: `git submodule update --init --recursive` (dependencies nes
 ### Test layout
 
 - `test/scaffold/` — characterization tests pinning upstream v4 behaviour the design depends on (fee flags, hook-address validity rules, `donate()` empty-range revert, priority-fee arithmetic). These guard against silent upstream drift; if one fails after a dependency bump, a design assumption has changed.
-- `test/invariant/Invariants.t.sol` — stubs for all twelve invariants, each `vm.skip`ped with the phase that unblocks it. `forge test` output is a live checklist. **Do not delete a stub to tidy the output**; replace the skip with a real assertion when its phase lands.
-- `test/utils/KesselTestBase.sol` — shared fixture over v4-core's `Deployers`.
+- `test/invariant/Invariants.t.sol` — all twelve invariants as real stateful assertions, none skipped, driven by `test/invariant/KesselHandler.sol`. **Do not delete an invariant to tidy the output.** A thirteenth, `invariant_handlerAgreesWithHookState`, exists to prove a run was not vacuous.
+- `test/property/` — fuzz tests over the pure libraries (`Clearing`, `FastLaneFee`). Cheap, so prefer adding here over a stateful test when the property is pure.
+- `test/integration/` — Fast Lane, Slow Lane, settlement, governance.
+- `test/security/` — adversarial tests, each written before its fix and observed to fail. **These encode closed attacks**: if one starts failing, an attack has reopened. See the SR-1…SR-5 entries in `docs/DECISIONS.md` for what each defends.
+- `test/utils/KesselTestBase.sol` — shared fixture over v4-core's `Deployers`. `KESSEL_FLAGS` here pins the frozen permission bitmap (DD-8).
 
 **Do not stage changes or attempt to commit to github**

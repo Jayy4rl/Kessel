@@ -78,9 +78,11 @@ multiline_func_header = "params_first"
 sort_imports = true
 
 [rpc_endpoints]
-# DD-2 is unresolved: no target chain has been chosen. These are listed so a
-# fork test can be pointed at a candidate, NOT as an indication that any of them
-# has been selected.
+# DD-2 selected Base mainnet (2026-08-23). `base` is the endpoint PRD §15
+# scenario 10's A3 fork test reads; it must be an ARCHIVE endpoint, since the
+# test forks at historical heights and pulls whole historical blocks. The
+# testnet entries below remain candidates for other fork work.
+base = "${BASE_RPC_URL}"
 unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC_URL}"
 base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
 sepolia = "${SEPOLIA_RPC_URL}"

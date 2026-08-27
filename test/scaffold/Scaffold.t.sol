@@ -134,6 +134,71 @@ contract ScaffoldTest is KesselTestBase {
     }
 
     // -----------------------------------------------------------------------
+    // `noSelfCall`: v4 skips a hook's own callbacks when the hook is the caller
+    //
+    // This is the single most load-bearing upstream fact in Kessel's settlement
+    // core, and nothing in the design documents names it. `_executeResidual`
+    // calls `poolManager.swap` on the very pool whose hook it is. If v4 ran the
+    // hook callbacks on that call, two things would follow silently:
+    //
+    //  * `_beforeSwap` would classify the residual as a FAST swap (its
+    //    `hookData` is empty, DD-1) and return a fee override of
+    //    `f_base + k*priorityFee` -- so Slow-Lane traders would pay the Fast
+    //    Lane's urgency tax, at the *carrying* trader's priority fee, on top of
+    //    `f_slow`. That is up to `MAX_FAST_FEE` (5%), and it would make the
+    //    effective Slow-Lane cost exceed `f_base` while I10 still read as
+    //    satisfied, because I10 only constrains the `f_slow` parameter.
+    //  * `_afterSwap` would re-enter settlement from inside settlement.
+    //
+    // Neither would fail a test: they would just quietly change what the Slow
+    // Lane costs. Pinned here so an upstream change fails loudly instead.
+    // -----------------------------------------------------------------------
+
+    function test_hookCallbacksAreSkippedWhenTheHookItselfSwaps() public {
+        _deployKessel();
+        _addWideLiquidity();
+        _fundAndApprove(address(this), 100 ether);
+
+        // A Slow-Lane order, so a residual swap is issued by the hook itself.
+        _slowOrder(alice, true, 1 ether, uint128(0.5 ether), 64);
+        vm.roll(block.number + 5);
+        // A high priority fee, so a fee override applied to the residual would
+        // be unmistakable: it saturates at MAX_FAST_FEE (5%).
+        _setPriorityFee(100 gwei);
+
+        vm.recordLogs();
+        _fastSwap(true, -1e15);
+        VmLog.Log[] memory logs = VmLog(address(vm)).getRecordedLogs();
+
+        uint256 poolSwaps;
+        uint256 hookFastSwapEvents;
+        bytes32 poolSwapSig = keccak256("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
+        bytes32 fastSwapSig = keccak256("FastSwap(address,bool,int256,uint256,uint24,uint24)");
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics.length == 0) continue;
+            if (logs[i].topics[0] == poolSwapSig) ++poolSwaps;
+            if (logs[i].emitter == address(hook) && logs[i].topics[0] == fastSwapSig) ++hookFastSwapEvents;
+        }
+
+        // Two swaps hit the curve: the carrier's, and the settlement residual.
+        assertEq(poolSwaps, 2, "expected the carrier swap and the settlement residual");
+        // But only ONE of them ran `beforeSwap`.
+        assertEq(hookFastSwapEvents, 1, "v4 ran the hook's own callbacks on its own swap");
+
+        // And the consequence that actually matters: the residual paid no LP
+        // fee. Closed form for an exact-input sale of `net0` into a constant-L
+        // range starting at price 1, with zero fee:
+        //     out = L - L / (1 + net0/L)
+        uint256 net0 = 1 ether - (1 ether * 500) / 1_000_000; // net of f_slow
+        uint256 l = 100 ether;
+        uint256 expectedZeroFeeOut = l - (l * l) / (l + net0);
+
+        uint256 owed = _order(1).owedOut;
+        uint256 diff = owed > expectedZeroFeeOut ? owed - expectedZeroFeeOut : expectedZeroFeeOut - owed;
+        assertLt(diff * 10_000 / expectedZeroFeeOut, 5, "the settlement residual was charged an LP fee");
+    }
+
+    // -----------------------------------------------------------------------
     // Priority fee readability (PRD §2.3, §4.1)
     //
     // `tx.gasprice - block.basefee` is the only sanctioned urgency signal.
@@ -164,4 +229,14 @@ contract ScaffoldTest is KesselTestBase {
 
         assertEq(tx.gasprice - block.basefee, tip, "priority fee mismatch");
     }
+}
+
+interface VmLog {
+    struct Log {
+        bytes32[] topics;
+        bytes data;
+        address emitter;
+    }
+
+    function getRecordedLogs() external returns (Log[] memory);
 }
