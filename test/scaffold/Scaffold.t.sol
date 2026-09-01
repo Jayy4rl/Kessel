@@ -189,7 +189,15 @@ contract ScaffoldTest is KesselTestBase {
         // fee. Closed form for an exact-input sale of `net0` into a constant-L
         // range starting at price 1, with zero fee:
         //     out = L - L / (1 + net0/L)
-        uint256 net0 = 1 ether - (1 ether * 500) / 1_000_000; // net of f_slow
+        //
+        // Measured against what the settlement ACTUALLY filled, not against the
+        // whole order. DD-5's residual cap bounds a single settlement's curve
+        // trade, so a 1-ether order clears over several epochs; the property
+        // being pinned here is about the fee on the residual, not about how
+        // much of the batch one settlement gets through.
+        uint256 grossFilled = 1 ether - _order(1).amountInRemaining;
+        assertGt(grossFilled, 0, "the settlement did not fill anything to measure");
+        uint256 net0 = grossFilled - (grossFilled * 500) / 1_000_000; // net of f_slow
         uint256 l = 100 ether;
         uint256 expectedZeroFeeOut = l - (l * l) / (l + net0);
 

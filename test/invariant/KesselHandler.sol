@@ -42,6 +42,12 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
     uint256 public slowOrders;
     uint256 public settlements;
     uint256 public redemptions;
+    uint256 public externalFills;
+
+    /// @dev Counterparty for the Shape B path. Deliberately not one of
+    /// `traders`, since the hook refuses a filler that is a beneficiary in the
+    /// batch it is filling.
+    InvariantFiller public filler;
 
     /// @dev Highest status each order has ever reached, so the invariant can
     /// detect a terminal state being left (I3).
@@ -59,6 +65,7 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
         key = _key;
         currency0 = _key.currency0;
         currency1 = _key.currency1;
+        filler = new InvariantFiller(_hook, _key.currency0, _key.currency1);
     }
 
     function _fund(
@@ -66,6 +73,10 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
     ) internal {
         deal(Currency.unwrap(currency0), address(this), amount * 4);
         deal(Currency.unwrap(currency1), address(this), amount * 4);
+        // The Shape B counterparty needs its own stock: it delivers out of
+        // inventory, not out of what the batch just paid it.
+        deal(Currency.unwrap(currency0), address(filler), amount * 4);
+        deal(Currency.unwrap(currency1), address(filler), amount * 4);
         IERC20Approve(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
         IERC20Approve(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
     }
@@ -167,6 +178,27 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
         } catch {}
     }
 
+    /// @dev Settlement via the external-fill path (Shape B): its own `unlock`,
+    /// an untrusted counterparty, and a floor of what the curve would have paid.
+    ///
+    /// The filler is driven across its whole behavioural range — beating the
+    /// floor, matching it exactly, and falling short — because the invariants
+    /// have to hold on the unwind just as much as on the fill. A short delivery
+    /// reverts the settlement, which the `catch` absorbs; that IS the case
+    /// worth generating, since it is the one where the hook has already paid
+    /// the batch's input away before discovering the problem.
+    function settleWithFill(
+        uint16 blocksSeed,
+        uint8 behaviourSeed
+    ) external {
+        vm.roll(block.number + bound(blocksSeed, 1, 400));
+        filler.setBehaviour(uint8(bound(behaviourSeed, 0, 200)));
+        try filler.deliverAndSettle() {
+            ++externalFills;
+            ++settlements;
+        } catch {}
+    }
+
     function sweep() external {
         try hook.sweepRecapture() {} catch {}
     }
@@ -176,7 +208,7 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
     function recordStatuses() external {
         uint256 next = hook.nextOrderId();
         for (uint256 id = 1; id < next; ++id) {
-            (,,,,,,, OrderStatus status) = hook.orders(id);
+            (,,,,,,,, OrderStatus status) = hook.orders(id);
             if (uint8(status) > everStatus[id]) everStatus[id] = uint8(status);
         }
     }
@@ -187,4 +219,73 @@ interface IERC20Approve {
         address,
         uint256
     ) external returns (bool);
+}
+
+/// @notice Counterparty for the Shape B path under the invariant machine.
+///
+/// `behaviour` is a percentage of the batch's likely need to deliver: high
+/// values over-deliver, low values fall short and must make the settlement
+/// revert and unwind. Both sides of that boundary are generated, because "the
+/// hook survives a filler that under-delivers" is exactly the property that
+/// cannot be established by only ever testing well-behaved counterparties.
+///
+/// The hook PULLS the declared delivery, which is the whole shape of the path:
+/// the hook never calls back into a filler.
+contract InvariantFiller {
+    KesselHook public immutable hook;
+    Currency public immutable currency0;
+    Currency public immutable currency1;
+    uint8 public behaviour = 100;
+
+    constructor(
+        KesselHook _hook,
+        Currency _c0,
+        Currency _c1
+    ) {
+        hook = _hook;
+        currency0 = _c0;
+        currency1 = _c1;
+    }
+
+    function setBehaviour(
+        uint8 b
+    ) external {
+        behaviour = b;
+    }
+
+    /// @dev Declare a delivery and settle in one call. The amount offered is
+    /// `behaviour` percent of the hook's own quoted floor, so the generated
+    /// range straddles the floor in both directions: below it the settlement
+    /// must revert and unwind, above it the batch must still price uniformly
+    /// and must still refuse to push the counter-side through its own limit.
+    function deliverAndSettle() external {
+        (bool ok, Currency outCurrency, uint256 floorOut,,) = hook.quoteFill();
+        if (!ok) {
+            // Still exercise the entry point: a batch with no residual is a
+            // legitimate settlement that pulls nothing.
+            hook.settleWithFill(0);
+            return;
+        }
+
+        uint256 offer = (floorOut * behaviour) / 100;
+        IERC20Minimal t = IERC20Minimal(Currency.unwrap(outCurrency));
+        if (t.balanceOf(address(this)) < offer) return;
+
+        t.approve(address(hook), offer);
+        hook.settleWithFill(offer);
+    }
+}
+
+interface IERC20Minimal {
+    function transfer(
+        address,
+        uint256
+    ) external returns (bool);
+    function approve(
+        address,
+        uint256
+    ) external returns (bool);
+    function balanceOf(
+        address
+    ) external view returns (uint256);
 }

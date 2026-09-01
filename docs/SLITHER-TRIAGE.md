@@ -27,9 +27,11 @@ any fix, per the security-review discipline, and are recorded as SR-6 and SR-7 i
 | 8 | `unused-return` — `poolManager.unlock(...)` in `redeem`, `forceSettle`, `sweepRecapture` | **False positive.** `unlockCallback` always returns `""`; there is nothing to read. | — | — |
 | 9 | `unused-return` — `poolManager.donate(...)` in `_recapture` | **False positive.** `donate` debits the caller by exactly `(fee0, fee1)`, which is what the following `settle` calls pay; the returned delta carries no information the call site does not already have. | — | — |
 | 10 | `unused-return` — `LaneCodec.decode` in `_afterSwap` | **False positive.** Only the lane is needed there; the Slow-Lane fields are decoded and discarded by design. | — | — |
-| 11 | `unused-return` — `poolManager.getSlot0` in `_poolPoint` | **False positive.** Only `sqrtPriceX96` and `tick` enter `Clearing.PoolPoint`; protocol/LP fee are irrelevant to the clearing solve. | — | — |
+| 11 | `unused-return` — `poolManager.getSlot0` in the settlement solve | **False positive.** Only `sqrtPriceX96` and `tick` enter `Clearing.PoolPoint`; protocol/LP fee are irrelevant to the clearing solve. (Reported against `_poolPoint` on the 2026-08-26 run; that helper was dead code and was removed on 2026-08-31, and the same pattern now sits in `_solveMultiRange`.) | — | — |
 | 12 | `reentrancy-benign` / `reentrancy-events` (10 instances across `_payoutOrder`, `_recapture`, `_openSlowOrder`, `_afterSwap`) | **False positive.** These are event-ordering and non-state observations. The one state-write case that mattered is finding 1. | — | — |
 | 13 | `assembly` — `_position` | **False positive.** Mirrors v4-core's own `TickBitmap.position`, verbatim and memory-safe. | — | — |
+| 14 | `reentrancy-no-eth` — `_executeAndDistribute`: `epochs`, `orders` and `warehoused*` written after an external call into the filler | **REAL — resolved by restructure, not triaged away** | `test/security/ExternalFill.t.sol` (14 tests) | Shape B inverted to deliver-first: the filler transfers before calling, the hook only measures, and payment happens after every write. The callback — and with it the pattern — is gone. |
+| 15 | `reentrancy-no-eth` — Slow-Lane intake reachable from inside a settlement | **REAL — found while triaging 14, not reported by Slither** | `test/security/FillIntakeReentrancy.t.sol` (failed pre-fix: the reentrant order was recorded) | `_openSlowOrder` reverts `SettlementInProgress` while `_settling` is held |
 
 ## After the fixes
 
@@ -44,6 +46,100 @@ rather than a modifier the detector recognises, so it still reports the raw
 write-after-call pattern. Kept as a known, documented false positive rather than
 suppressed, so that a future change which *removes* the guard does not also
 silently remove the warning.
+
+## Addendum — 2026-08-29, the external-fill path (Shape B)
+
+`settleWithFill` initially added a **third** site with the same shape as finding
+1, and the first where the callee was fully untrusted rather than the
+PoolManager: the hook paid the filler, called `fillKesselBatch` on a
+caller-nominated contract, and then wrote `epochs`, `orders` and `warehoused*`.
+
+That was first documented here as inherent and kept, on the reasoning that
+`Clearing.fillRatio` needs the delivery before it can produce a fill ratio, so
+the call must precede the writes. **That reasoning was wrong, and the finding is
+now fixed rather than triaged.** It assumed the hook had to pay first and call
+back. Inverting the flow removes the requirement entirely:
+
+- the filler transfers the output currency to the hook **before** calling
+  `settleWithFill`, in the same transaction;
+- the hook measures its own balance, refuses anything below the curve floor,
+  and completes every state write with no external call in between;
+- the filler is paid the batch's input **last**, after the writes.
+
+There is no callback, so there is no window in which a half-finished settlement
+is holding an untrusted contract's control, and no write-after-untrusted-call
+ordering for the detector to report. `quoteFill()` exists so a filler can size
+the delivery without one.
+
+Nothing is lost that mattered. A filler with inventory delivers directly; a
+filler without one wraps the call in a flash loan from anywhere else. The
+atomicity moves outside Kessel rather than being manufactured inside it, and the
+hook stops being a flash-lender to arbitrary contracts mid-settlement.
+
+The only remaining call-then-write in the path is `_settling = false` after the
+outbound payment, which is the standard reentrancy-guard reset: it cannot be
+moved earlier without defeating the guard.
+
+Finding 1's disposition on `_payoutOrderInner` is **unchanged** — that one is
+genuinely inherent, since a payout is an outbound transfer by definition, and
+remains a documented, unsuppressed report.
+
+### What triaging it actually found
+
+Reasoning about the callee's reach turned up a real gap that Slither did not
+report, and that no existing test covered:
+
+`poolManager.swap` is `onlyWhenUnlocked`, not `onlyByTheUnlocker` — the SR-6
+asymmetry. Any contract holding control inside the hook's own `unlock` may call
+it directly with SLOW `hookData`, reach `_openSlowOrder`, and write
+`warehoused*`, `orders`, `epochOrderIds` and `currentEpoch` underneath work that
+is half-finished. `_settling` did not cover intake, and v4's nested-`unlock`
+prohibition does not either, because intake needs no unlock of its own.
+
+It was found via the filler callback, which no longer exists — but the gap was
+never specific to it. It is still live on the **redemption** path, which is not
+going away: `_settling` is held across `_payoutOrder`, `poolManager.take` of
+native currency hands control to the recipient with a bare `call`, and DD-14
+refuses native ETH only as Slow-Lane *input*, so a `oneForZero` order on an
+ETH-quoted pool pays out in ETH. That is the same reentry point SR-6 documents,
+and `test/security/FillIntakeReentrancy.t.sol` now exercises the guard there.
+
+No concrete corruption was constructed through it. It is closed structurally
+anyway, because SR-4 is the standing reminder that "unreachable by argument" is
+not the same as unreachable, and this contract cannot be patched.
+
+**This fix needs an SR number and a `docs/DECISIONS.md` entry, which only the
+owner assigns.** It is recorded here because it was found during triage; it is
+deliberately not written into the decision register by the agent that found it.
+
+### What remains reachable through the filler call, and why it is inert
+
+| Filler attempts | Outcome |
+|---|---|
+| Reenter settlement | `_settleEpochInner` returns early on `_settling` |
+| `settleWithFill` / `forceSettle` / `redeem` / `sweepRecapture` | each opens its own `unlock` → v4 `AlreadyUnlocked` |
+| Direct FAST `poolManager.swap` | permitted; `afterSwap` declines on `_settling` |
+| Direct SLOW `poolManager.swap` | reverts `SettlementInProgress` (the fix above) |
+| Anything at all during the fill | **not reachable** — there is no callback into the filler |
+| Move the price, or add/remove liquidity | permitted, and inert for this settlement |
+
+The last row is the one worth justifying rather than asserting. Nothing after
+the filler call reads pool state: the remainder of `_executeAndDistribute` runs
+on `poolDelta` (measured across the call), the `Cand[] memory` snapshot taken
+before it, and `net0`/`net1` computed before it. The only post-call external
+call is `poolManager.donate` in `_recapture`, which is already wrapped in
+`try`/`catch` with the PRD §6.2 `lpClaimable` fallback — so a filler that pulls
+all in-range liquidity mid-fill can at most divert that settlement's `f_slow`
+into the deferred-donation balance, where it stays owed to LPs.
+
+### Not re-run
+
+Slither 0.11.6 is **not installed in the environment these changes were made
+in**, so the table above is reasoning from the detector's known behaviour on
+findings 1–13, not from a fresh run. Re-running it is a prerequisite for review:
+the external-fill path is exactly the shape (`reentrancy-no-eth`,
+`reentrancy-benign`, `unused-return` on `poolManager.settle`) that this tool is
+good at, and the addendum should be replaced with real output.
 
 ## Raw output — first run (before fixes)
 

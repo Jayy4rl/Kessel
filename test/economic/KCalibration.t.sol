@@ -262,17 +262,16 @@ contract KCalibrationTest is KesselTestBase {
         for (uint256 i; i < notionals.length; ++i) {
             uint256 k90 = kForTargetCapture(ANCHOR_BALANCER_BPS, notionals[i], gasUsed);
             uint256 k98 = kForTargetCapture(ANCHOR_ANGSTROM_BPS, notionals[i], gasUsed);
-            console2.log(
-                string.concat(
-                    vm.toString(notionals[i] / 1e15),
-                    "e15  ",
-                    vm.toString(k90),
-                    "  ",
-                    vm.toString(k98),
-                    "  ",
-                    (k98 <= K_MAX) ? "yes" : "NO - above K_MAX"
-                )
-            );
+            {
+                string memory _line = vm.toString(notionals[i] / 1e15);
+                _line = string.concat(_line, "e15  ");
+                _line = string.concat(_line, vm.toString(k90));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(k98));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, (k98 <= K_MAX) ? "yes" : "NO - above K_MAX");
+                console2.log(_line);
+            }
         }
     }
 
@@ -317,15 +316,14 @@ contract KCalibrationTest is KesselTestBase {
 
         console2.log("per-bucket capture at the 90% k (bps):");
         for (uint256 i; i < profile.length; ++i) {
-            console2.log(
-                string.concat(
-                    "  ",
-                    profile[i].label,
-                    ": ",
-                    vm.toString(captureBpsAt(k90, profile[i].notional, profile[i].gasUsed)),
-                    " bps"
-                )
-            );
+            {
+                string memory _line = "  ";
+                _line = string.concat(_line, profile[i].label);
+                _line = string.concat(_line, ": ");
+                _line = string.concat(_line, vm.toString(captureBpsAt(k90, profile[i].notional, profile[i].gasUsed)));
+                _line = string.concat(_line, " bps");
+                console2.log(_line);
+            }
         }
     }
 

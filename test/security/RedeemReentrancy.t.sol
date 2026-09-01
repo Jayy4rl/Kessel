@@ -60,7 +60,9 @@ contract RedeemReentrancyTest is KesselTestBase {
 
         address target = address(uint160(KESSEL_FLAGS) | (uint160(0x4444) << 144));
         deployCodeTo(
-            "KesselHook.sol:KesselHook", abi.encode(manager, currency0, currency1, TICK_SPACING, governance), target
+            "KesselHook.sol:KesselHook",
+            abi.encode(manager, currency0, currency1, TICK_SPACING, governance, uint8(0)),
+            target
         );
         hook = KesselHook(target);
 
@@ -68,16 +70,40 @@ contract RedeemReentrancyTest is KesselTestBase {
             currency0, currency1, IHooks(address(hook)), LPFeeLibrary.DYNAMIC_FEE_FLAG, TICK_SPACING, SQRT_PRICE_1_1
         );
 
-        // Two nested positions. The inner one's edges are initialised ticks, so
-        // a large enough batch clamps against tick 6000 and only PARTIALLY
-        // fills; the outer one guarantees there is still liquidity beyond that
-        // edge, so the remainder can be completed by a later settlement.
-        vm.deal(address(this), 2_000 ether);
-        token.mint(address(this), 2_000 ether);
+        // Nested positions, laid out so this order PARTIALLY fills and the
+        // remainder can still be completed by a later settlement. Both halves
+        // of that are load-bearing for the attack: the partial fill is what
+        // leaves an order PENDING with a non-zero `owedOut` to be caught
+        // mid-payout, and the completable remainder is what the reentrant
+        // settlement fills underneath it.
+        //
+        // The mechanism producing the partial fill changed with the multi-range
+        // amendment to DD-5 and this setup changed with it. It used to be
+        // enough to clamp against ONE initialised tick, because the solver
+        // stopped at the first one it met. The solver now walks up to
+        // `MAX_CLEARING_RANGES` of them, so a single edge no longer holds it
+        // back — what does is running out of range budget.
+        //
+        // Hence the layout: five narrow nested positions whose upper edges sit
+        // at 600/1200/1800/2400/3000, plus one wide position that stays active
+        // throughout and continues far beyond them. The order is `oneForZero`,
+        // so it walks the price UP through those edges and exhausts the range
+        // budget well before it exhausts either the order or the liquidity.
+        //
+        // Both properties the attack needs therefore hold structurally rather
+        // than by a tuned `ORDER_SIZE`: it partially fills because the walk is
+        // bounded, and the remainder stays completable because the wide
+        // position still has depth past where the walk stopped.
+        vm.deal(address(this), 20_000 ether);
+        token.mint(address(this), 20_000 ether);
         token.approve(address(modifyLiquidityRouter), type(uint256).max);
         token.approve(address(swapRouter), type(uint256).max);
         _addNativeLiquidity(-60_000, 60_000, 100 ether);
-        _addNativeLiquidity(-6_000, 6_000, 100 ether);
+        _addNativeLiquidity(-3_000, 3_000, 100 ether);
+        _addNativeLiquidity(-2_400, 2_400, 100 ether);
+        _addNativeLiquidity(-1_800, 1_800, 100 ether);
+        _addNativeLiquidity(-1_200, 1_200, 100 ether);
+        _addNativeLiquidity(-600, 600, 100 ether);
 
         attacker = new ReenteringTrader(manager, hook, swapRouter, key);
         token.mint(address(attacker), ORDER_SIZE + 1 ether);
@@ -109,9 +135,10 @@ contract RedeemReentrancyTest is KesselTestBase {
         );
     }
 
-    /// @dev Drive the order to a partial fill: 100 ether of currency1 against
-    /// an inner position whose upper edge is tick 6000 clamps the residual, so
-    /// roughly 70% fills and the rest rolls into the next epoch.
+    /// @dev Drive the order to a partial fill: 100 ether of currency1 walks the
+    /// price up through the clustered initialised ticks laid out in `setUp`,
+    /// exhausts the solver's range budget part-way, and rolls the remainder
+    /// into the next epoch.
     function _partiallyFilledOrder() internal returns (uint256 id) {
         id = attacker.submit(ORDER_SIZE);
 

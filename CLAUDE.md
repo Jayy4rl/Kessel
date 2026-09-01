@@ -17,7 +17,7 @@ The economic point: letting traders self-select lane by urgency (a screening/pri
 
 ## Before implementing: the design decisions are resolved but unratified
 
-**All 15 DDs are now RESOLVED in `docs/DECISIONS.md`, and only DD-2 was resolved by a human.** DD-1 and DD-3…DD-15 were resolved on 2026-08-25 by an implementation agent under an explicit owner directive to research and record each one before implementing it. Read them as *decisions taken and argued*, not as *decisions ratified* — they remain subject to owner review and reversal, and `docs/OPEN-QUESTIONS.md` lists which ones most warrant a second look (DD-4, DD-5 and DD-11 above all). Five later amendments (SR-1…SR-5), driven by the security review, changed protocol-visible behaviour after the fact and are recorded in the same file.
+**All 15 DDs are now RESOLVED in `docs/DECISIONS.md`, and only DD-2 was resolved by a human.** DD-1 and DD-3…DD-15 were resolved on 2026-08-25 by an implementation agent under an explicit owner directive to research and record each one before implementing it. Read them as *decisions taken and argued*, not as *decisions ratified* — they remain subject to owner review and reversal, and `docs/OPEN-QUESTIONS.md` lists which ones most warrant a second look (DD-4, DD-5 and DD-11 above all). Thirteen later amendments (SR-1…SR-13) changed protocol-visible behaviour after the fact and are recorded in the same file: SR-1…SR-7 from the security review, and SR-8…SR-13 from the 2026-09-01 external audit. That audit's two unactioned findings are recorded there too, under "Audit findings NOT acted on"; each needs an owner decision.
 
 Do not re-resolve a DD, and do not treat one as unsettled because the register's own standing rule says only a human may resolve it. If you disagree with a resolution, say so and ask — do not quietly implement something else.
 
@@ -61,7 +61,7 @@ After a fresh clone: `git submodule update --init --recursive` (dependencies nes
 - `test/invariant/Invariants.t.sol` — all twelve invariants as real stateful assertions, none skipped, driven by `test/invariant/KesselHandler.sol`. **Do not delete an invariant to tidy the output.** A thirteenth, `invariant_handlerAgreesWithHookState`, exists to prove a run was not vacuous.
 - `test/property/` — fuzz tests over the pure libraries (`Clearing`, `FastLaneFee`). Cheap, so prefer adding here over a stateful test when the property is pure.
 - `test/integration/` — Fast Lane, Slow Lane, settlement, governance.
-- `test/security/` — adversarial tests, each written before its fix and observed to fail. **These encode closed attacks**: if one starts failing, an attack has reopened. See the SR-1…SR-5 entries in `docs/DECISIONS.md` for what each defends.
+- `test/security/` — adversarial tests, each written before its fix and observed to fail. **These encode closed attacks**: if one starts failing, an attack has reopened. See the SR-1…SR-13 entries in `docs/DECISIONS.md` for what each defends.
 - `test/utils/KesselTestBase.sol` — shared fixture over v4-core's `Deployers`. `KESSEL_FLAGS` here pins the frozen permission bitmap (DD-8).
 
 **Do not stage changes or attempt to commit to github**

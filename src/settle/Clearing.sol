@@ -80,10 +80,21 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 /// and clamping to them would make partial fills the norm rather than the
 /// exception — the active range is typically far wider than one spacing.
 ///
-/// When the clamp does bind, the batch fills pro rata at ratio `lambda < 1` and
-/// the remainder rolls to the next epoch (DD-11). Every order still receives
-/// the same price and the same fill ratio, so I4 holds; the cost is that a
-/// batch large enough to cross an initialised tick settles over several epochs.
+/// When the clamp binds, this library alone can only fill the batch pro rata at
+/// ratio `lambda < 1` and roll the remainder (DD-11).
+///
+/// The caller is no longer obliged to stop there. `KesselHook._solveMultiRange`
+/// walks up to `MAX_CLEARING_RANGES` consecutive ranges, calling `solve` once
+/// per range with that range's own liquidity and whatever of the batch remains,
+/// and crossing the initialised tick between them exactly as v4's own swap loop
+/// does. Each call stays inside a single constant-`L` range, so the closed form
+/// stays exact everywhere it is used.
+///
+/// What makes that safe to do approximately is `fillRatio` below: the walk only
+/// has to choose a good *target*, and any discrepancy between the predicted and
+/// realised trade is absorbed. A batch that crosses a tick now fills in one
+/// settlement instead of several, and every order still receives the same price
+/// and the same fill ratio, so I4 is untouched either way.
 library Clearing {
     uint256 internal constant Q96 = 1 << 96;
 
@@ -101,6 +112,14 @@ library Clearing {
         uint160 lowerSqrtPriceX96;
         /// @dev Sqrt price of the next initialised tick above the current one.
         uint160 upperSqrtPriceX96;
+        /// @dev DD-5 residual cap: the most input this settlement may push
+        /// through the curve in this range. Zero means uncapped.
+        ///
+        /// This is settlement-time state — it is derived from the pool's own
+        /// liquidity and price at settlement plus a governance constant — so it
+        /// carries no submission-time information and I6 is untouched. See
+        /// `KesselHook._residualCap` for the derivation.
+        uint256 maxResidualIn;
     }
 
     /// @notice A solved batch.
@@ -117,6 +136,12 @@ library Clearing {
         bool zeroForOne;
         /// @dev Exact-input amount for the residual swap.
         uint256 residualIn;
+        /// @dev What the pool would pay out for `residualIn` over this range.
+        /// Only meaningful within one constant-liquidity range, which is the
+        /// only place `solve` is ever called. The multi-range driver uses it to
+        /// work out how much of the batch a single range absorbs, by feeding
+        /// the pair straight into `fillRatio`.
+        uint256 residualOut;
         /// @dev Predicted uniform clearing price, Q96, currency1-per-currency0.
         /// Used for the eligibility test only; the *payouts* are computed from
         /// what the pool actually returned, so rounding can never make the hook
@@ -182,6 +207,28 @@ library Clearing {
             b = uint160(bRaw);
         }
 
+        // ---- Clamp to the DD-5 residual cap --------------------------------
+        // The sandwich the settlement residual is exposed to extracts an amount
+        // LINEAR in the residual and linear in the attacker's own size, against
+        // a cost (`f_base` on two legs) that is also linear in the attacker's
+        // size. The attacker's size therefore cancels: whether the attack pays
+        // is decided by the residual alone. Bounding the residual bounds the
+        // attack unconditionally — at every attacker size, every `k`, and every
+        // amount of slack traders leave in their limits.
+        //
+        // Expressed as a price bound rather than an amount so that everything
+        // downstream — `residualIn`, `residualOut`, `priceX96`, `clamped` — is
+        // recomputed consistently from the same `b`, exactly as the liquidity
+        // clamp above already is. The remainder rolls through the partial-fill
+        // path that DD-11 already built and SR-1 already made safe.
+        if (p.maxResidualIn != 0) {
+            uint160 bCap = SqrtPriceMath.getNextSqrtPriceFromInput(a, p.liquidity, p.maxResidualIn, bRaw < a);
+            if (bRaw < a ? b < bCap : b > bCap) {
+                b = bCap;
+                s.clamped = true;
+            }
+        }
+
         // v4 requires a strict inequality against the price limit, so a target
         // sitting exactly on a global bound cannot be used as one.
         if (b <= TickMath.MIN_SQRT_PRICE) b = TickMath.MIN_SQRT_PRICE + 1;
@@ -195,12 +242,19 @@ library Clearing {
         // Rounded DOWN in both directions: the hook must never commit more
         // input to the pool than the price target justifies. Any shortfall is
         // absorbed by `lambda`, which is derived from what actually executed.
+        //
+        // The output side is rounded down for the same reason in reverse: it
+        // is only ever used to *size* how much of the batch a range absorbs,
+        // and under-stating it under-states the absorption, which costs a
+        // partial fill rather than solvency.
         if (b < a) {
             s.zeroForOne = true;
             s.residualIn = SqrtPriceMath.getAmount0Delta(b, a, p.liquidity, false);
+            s.residualOut = SqrtPriceMath.getAmount1Delta(b, a, p.liquidity, false);
         } else if (b > a) {
             s.zeroForOne = false;
             s.residualIn = SqrtPriceMath.getAmount1Delta(a, b, p.liquidity, false);
+            s.residualOut = SqrtPriceMath.getAmount0Delta(a, b, p.liquidity, false);
         }
         // b == a: perfectly matched batch, residualIn stays 0.
 

@@ -110,15 +110,40 @@ contract DD5ManipulationTest is KesselTestBase {
     // Fixture
     // ==================================================================
 
+    /// @dev Snapshot of the deployed-and-funded world, taken once and reverted
+    /// to for every subsequent cell.
+    uint256 private _pristine = type(uint256).max;
+
+    /// @dev A clean pool at a given `k`.
+    ///
+    /// @dev The sweeps in this file call this twice per cell — once with a
+    /// batch pending and once without — so a full redeploy each time costs
+    /// `2 * cells` deployments of the manager, routers, currencies, hook and
+    /// pool, plus four funded accounts. At 42 cells that is 84 of them, and
+    /// `test_DD5_extractionAsShareOfBatchVersusSlack` used to exhaust the
+    /// 3e9 `gas_limit` part-way through its last row and die `MemoryOOG` with
+    /// six of its seven rows already printed.
+    ///
+    /// Deploying once and reverting to a snapshot is equivalent — a reverted
+    /// snapshot restores contract code, balances and block number alike — and
+    /// costs a fraction of it. The snapshot is retaken after each revert
+    /// because reverting consumes it, and it is taken *before* `setK` so that
+    /// `k` remains a per-cell parameter rather than being baked in.
     function _freshPool(
         uint256 k
     ) internal {
-        _deployKessel();
-        _addLiquidity(WIDE_LOWER, WIDE_UPPER, int256(LIQUIDITY));
-        _fundAndApprove(address(this), 10_000 ether);
-        _fundAndApprove(attacker, 10_000 ether);
-        _fundAndApprove(alice, 10_000 ether);
-        _fundAndApprove(bob, 10_000 ether);
+        if (_pristine == type(uint256).max) {
+            _deployKessel();
+            _addLiquidity(WIDE_LOWER, WIDE_UPPER, int256(LIQUIDITY));
+            _fundAndApprove(address(this), 10_000 ether);
+            _fundAndApprove(attacker, 10_000 ether);
+            _fundAndApprove(alice, 10_000 ether);
+            _fundAndApprove(bob, 10_000 ether);
+        } else {
+            vm.revertToState(_pristine);
+        }
+        _pristine = vm.snapshotState();
+
         vm.prank(governance);
         hook.setK(k);
     }
@@ -343,26 +368,33 @@ contract DD5ManipulationTest is KesselTestBase {
         uint256 attackSize,
         Outcome memory o
     ) internal pure {
-        console2.log(
-            string.concat(
-                "batch=",
-                _u(batch / 1e15),
-                "e15 resBps=",
-                _u(resBps),
-                " k=",
-                _u(k),
-                " A=",
-                _u(attackSize / 1e12),
-                " ext=",
-                _i(o.extraction / 1e12),
-                " tax=",
-                _u(o.tax / 1e12),
-                " netPnl=",
-                _i(o.pnlWith / 1e12),
-                " => ",
-                o.extraction > int256(o.tax) ? "PROFITABLE" : "not profitable"
-            )
-        );
+        {
+            string memory _line = "batch=";
+            _line = string.concat(_line, _u(batch / 1e15));
+            _line = string.concat(_line, "e15 resBps=");
+            _line = string.concat(_line, _u(resBps));
+            _line = string.concat(_line, " k=");
+            _line = string.concat(_line, _u(k));
+            _line = string.concat(_line, " A=");
+            _line = string.concat(_line, _u(attackSize / 1e12));
+            _line = string.concat(_line, " ext=");
+            _line = string.concat(_line, _i(o.extraction / 1e12));
+            _line = string.concat(_line, " tax=");
+            _line = string.concat(_line, _u(o.tax / 1e12));
+            _line = string.concat(_line, " netPnl=");
+            _line = string.concat(_line, _i(o.pnlWith / 1e12));
+            _line = string.concat(_line, " => ");
+            // Verdict is NET P&L, not `extraction > tax`. The original framing
+            // isolated the priority-fee tax because the question then was
+            // whether the tax could be made to bind — it cannot, and §3 says
+            // why. DD-5's closure is the residual cap, whose binding cost on
+            // the attacker is `f_base` on two legs, so a row where extraction
+            // exceeds the tax while the attacker still loses money is a row the
+            // defence WON. Reporting that as "PROFITABLE" would misstate the
+            // result in the direction of false alarm.
+            _line = string.concat(_line, o.pnlWith > 0 ? "PROFITABLE" : "not profitable");
+            console2.log(_line);
+        }
     }
 
     function _u(
@@ -397,18 +429,17 @@ contract DD5ManipulationTest is KesselTestBase {
                 _runCell(Cell({batch: batch, residualBps: 10_000, k: 500, attackSize: attackSize, slackBps: 5_000}));
             int256 cpamm = _runCpammBenchmark(500, batch, attackSize);
 
-            console2.log(
-                string.concat(
-                    "batch=",
-                    _u(batch / 1e15),
-                    "e15  kessel=",
-                    _i(o.extraction / 1e12),
-                    "  cpamm=",
-                    _i(cpamm / 1e12),
-                    "  half=",
-                    _i(cpamm / 2e12)
-                )
-            );
+            {
+                string memory _line = "batch=";
+                _line = string.concat(_line, _u(batch / 1e15));
+                _line = string.concat(_line, "e15  kessel=");
+                _line = string.concat(_line, _i(o.extraction / 1e12));
+                _line = string.concat(_line, "  cpamm=");
+                _line = string.concat(_line, _i(cpamm / 1e12));
+                _line = string.concat(_line, "  half=");
+                _line = string.concat(_line, _i(cpamm / 2e12));
+                console2.log(_line);
+            }
         }
     }
 
@@ -424,11 +455,15 @@ contract DD5ManipulationTest is KesselTestBase {
             Outcome memory o = _runCell(
                 Cell({batch: 20 ether, residualBps: residuals[i], k: 500, attackSize: residual + 1e15, slackBps: 5_000})
             );
-            console2.log(
-                string.concat(
-                    "resBps=", _u(residuals[i]), "  extraction=", _i(o.extraction / 1e12), "  tax=", _u(o.tax / 1e12)
-                )
-            );
+            {
+                string memory _line = "resBps=";
+                _line = string.concat(_line, _u(residuals[i]));
+                _line = string.concat(_line, "  extraction=");
+                _line = string.concat(_line, _i(o.extraction / 1e12));
+                _line = string.concat(_line, "  tax=");
+                _line = string.concat(_line, _u(o.tax / 1e12));
+                console2.log(_line);
+            }
         }
     }
 
@@ -492,22 +527,21 @@ contract DD5ManipulationTest is KesselTestBase {
                     bestA = sizes[j];
                 }
             }
-            console2.log(
-                string.concat(
-                    "slack=",
-                    _u(slacks[i]),
-                    "bps  bestA=",
-                    _u(bestA / 1e12),
-                    "  ext=",
-                    _i(best.extraction / 1e12),
-                    "  tax=",
-                    _u(best.tax / 1e12),
-                    "  netPnl=",
-                    _i(best.pnlWith / 1e12),
-                    "  batchFilled=",
-                    _u(best.filled / 1e12)
-                )
-            );
+            {
+                string memory _line = "slack=";
+                _line = string.concat(_line, _u(slacks[i]));
+                _line = string.concat(_line, "bps  bestA=");
+                _line = string.concat(_line, _u(bestA / 1e12));
+                _line = string.concat(_line, "  ext=");
+                _line = string.concat(_line, _i(best.extraction / 1e12));
+                _line = string.concat(_line, "  tax=");
+                _line = string.concat(_line, _u(best.tax / 1e12));
+                _line = string.concat(_line, "  netPnl=");
+                _line = string.concat(_line, _i(best.pnlWith / 1e12));
+                _line = string.concat(_line, "  batchFilled=");
+                _line = string.concat(_line, _u(best.filled / 1e12));
+                console2.log(_line);
+            }
         }
     }
 
@@ -541,25 +575,24 @@ contract DD5ManipulationTest is KesselTestBase {
             }
 
             int256 extBps = (best.extraction * 10_000) / int256(batch);
-            console2.log(
-                string.concat(
-                    "slack=",
-                    _u(slacks[i]),
-                    "bps  bestA=",
-                    _u(bestA / 1e15),
-                    "e15  ext=",
-                    _i(best.extraction / 1e12),
-                    " (",
-                    _i(extBps),
-                    " bps of batch)  tax=",
-                    _u(best.tax / 1e12),
-                    "  netPnl=",
-                    _i(best.pnlWith / 1e12),
-                    "  filled=",
-                    _u(best.filled / 1e15),
-                    "e15"
-                )
-            );
+            {
+                string memory _line = "slack=";
+                _line = string.concat(_line, _u(slacks[i]));
+                _line = string.concat(_line, "bps  bestA=");
+                _line = string.concat(_line, _u(bestA / 1e15));
+                _line = string.concat(_line, "e15  ext=");
+                _line = string.concat(_line, _i(best.extraction / 1e12));
+                _line = string.concat(_line, " (");
+                _line = string.concat(_line, _i(extBps));
+                _line = string.concat(_line, " bps of batch)  tax=");
+                _line = string.concat(_line, _u(best.tax / 1e12));
+                _line = string.concat(_line, "  netPnl=");
+                _line = string.concat(_line, _i(best.pnlWith / 1e12));
+                _line = string.concat(_line, "  filled=");
+                _line = string.concat(_line, _u(best.filled / 1e15));
+                _line = string.concat(_line, "e15");
+                console2.log(_line);
+            }
         }
     }
 
@@ -591,23 +624,22 @@ contract DD5ManipulationTest is KesselTestBase {
                     bestA = sizes[j];
                 }
             }
-            console2.log(
-                string.concat(
-                    "residual=",
-                    _u(batch / 1e15),
-                    "e15 (",
-                    _u((batch * 10_000) / 95 ether),
-                    " bps of depth)  bestA=",
-                    _u(bestA / 1e15),
-                    "e15  ext=",
-                    _i(best.extraction / 1e12),
-                    "  tax=",
-                    _u(best.tax / 1e12),
-                    "  netPnl=",
-                    _i(best.pnlWith / 1e12),
-                    best.pnlWith > 0 ? "  <== PROFITABLE" : ""
-                )
-            );
+            {
+                string memory _line = "residual=";
+                _line = string.concat(_line, _u(batch / 1e15));
+                _line = string.concat(_line, "e15 (");
+                _line = string.concat(_line, _u((batch * 10_000) / 95 ether));
+                _line = string.concat(_line, " bps of depth)  bestA=");
+                _line = string.concat(_line, _u(bestA / 1e15));
+                _line = string.concat(_line, "e15  ext=");
+                _line = string.concat(_line, _i(best.extraction / 1e12));
+                _line = string.concat(_line, "  tax=");
+                _line = string.concat(_line, _u(best.tax / 1e12));
+                _line = string.concat(_line, "  netPnl=");
+                _line = string.concat(_line, _i(best.pnlWith / 1e12));
+                _line = string.concat(_line, best.pnlWith > 0 ? "  <== PROFITABLE" : "");
+                console2.log(_line);
+            }
         }
     }
 }

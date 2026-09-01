@@ -36,7 +36,8 @@ contract ClearingPropertiesTest is Test {
             sqrtPriceX96: sqrtPriceX96,
             liquidity: liquidity,
             lowerSqrtPriceX96: TickMath.getSqrtPriceAtTick(tick - 6000),
-            upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(tick + 6000)
+            upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(tick + 6000),
+            maxResidualIn: 0 // uncapped: these properties characterise the solver itself
         });
     }
 
@@ -50,7 +51,8 @@ contract ClearingPropertiesTest is Test {
             sqrtPriceX96: sqrtPriceX96,
             liquidity: liquidity,
             lowerSqrtPriceX96: TickMath.getSqrtPriceAtTick(tick - 60),
-            upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(tick + 60)
+            upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(tick + 60),
+            maxResidualIn: 0 // uncapped: these properties characterise the solver itself
         });
     }
 
@@ -348,6 +350,105 @@ contract ClearingPropertiesTest is Test {
 
         assertEq(Clearing.meetsLimit(true, limit, price), price >= limit, "zeroForOne limit is a floor");
         assertEq(Clearing.meetsLimit(false, limit, price), price <= limit, "oneForZero limit is a ceiling");
+    }
+
+    // ======================================================================
+    // Domain edges
+    //
+    // `solve` is total: every input it can be handed must produce a Solution,
+    // never a revert and never a price the caller cannot use. These pin the
+    // four refusals it makes at the edges of the price domain, each of which is
+    // a branch that ordinary batches never reach — and each of which, on an
+    // immutable contract, is only ever exercised for the first time in
+    // production if it is not exercised here.
+    // ======================================================================
+
+    /// @notice At the bottom of the price domain the target is pushed strictly
+    /// off `MIN_SQRT_PRICE`, and the resulting price underflows to zero and is
+    /// refused rather than returned as a usable clearing price.
+    ///
+    /// @dev Two guards in one test because they are reachable only together.
+    /// v4 requires a strict inequality against a swap's price limit, so a
+    /// target sitting exactly on the global bound cannot be used as one; but a
+    /// pool that far down has `a * b < 2**96`, so the Q96 price truncates to
+    /// zero. A zero price would divide by zero in the eligibility test, so
+    /// `solve` reports infeasible instead.
+    function test_bottomOfThePriceDomainIsRefusedNotReturned() public pure {
+        uint160 a = TickMath.MIN_SQRT_PRICE + 1;
+        Clearing.Solution memory s = Clearing.solve(
+            Clearing.PoolPoint({
+                sqrtPriceX96: a,
+                liquidity: 1e24,
+                lowerSqrtPriceX96: TickMath.MIN_SQRT_PRICE,
+                upperSqrtPriceX96: a + 1_000,
+                maxResidualIn: 0 // uncapped: these properties characterise the solver itself
+            }),
+            1e24, // enough currency0 to drive the target through the floor
+            0
+        );
+
+        assertGt(s.sqrtPriceTargetX96, TickMath.MIN_SQRT_PRICE, "target must be strictly inside the domain");
+        assertEq(s.priceX96, 0, "price at the floor underflows to zero");
+        assertFalse(s.feasible, "an unusable price must be refused");
+    }
+
+    /// @notice The mirror guard at the top: the target is pushed strictly below
+    /// `MAX_SQRT_PRICE`.
+    function test_topOfThePriceDomainStaysStrictlyInsideTheBound() public pure {
+        uint160 a = TickMath.getSqrtPriceAtTick(TickMath.MAX_TICK - 1);
+        Clearing.Solution memory s = Clearing.solve(
+            Clearing.PoolPoint({
+                sqrtPriceX96: a,
+                liquidity: 1e6, // thin, so the batch below can outrun the range
+                lowerSqrtPriceX96: a - 1_000,
+                upperSqrtPriceX96: TickMath.MAX_SQRT_PRICE,
+                maxResidualIn: 0 // uncapped: these properties characterise the solver itself
+            }),
+            0,
+            1e30 // enough currency1 to drive the target through the ceiling
+        );
+
+        assertTrue(s.clamped, "the solve must have clamped at the ceiling");
+        assertLt(s.sqrtPriceTargetX96, TickMath.MAX_SQRT_PRICE, "target must be strictly inside the domain");
+    }
+
+    /// @notice A clamp that leaves the curve no room at all is infeasible, not
+    /// a zero-size fill.
+    ///
+    /// @dev The batch needs the curve and the curve cannot move: the active
+    /// range's lower bound IS the current price. Filling here would consume
+    /// trader input against a zero residual and pay out nothing. This is
+    /// reachable in ordinary operation — a pool sitting exactly on a
+    /// bitmap-word edge has no room in one direction — which is why it is a
+    /// refusal rather than an assertion.
+    function test_aClampWithNoRoomIsInfeasible() public pure {
+        uint160 a = TickMath.getSqrtPriceAtTick(0);
+        Clearing.Solution memory s = Clearing.solve(
+            Clearing.PoolPoint({
+                sqrtPriceX96: a,
+                liquidity: 1e24,
+                lowerSqrtPriceX96: a, // no room below: the range starts here
+                upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(6000),
+                maxResidualIn: 0 // uncapped: these properties characterise the solver itself
+            }),
+            100e18,
+            0
+        );
+
+        assertTrue(s.clamped, "the solve must have clamped");
+        assertEq(s.residualIn, 0, "a zero-width range can absorb nothing");
+        assertFalse(s.feasible, "no room means infeasible, not a zero fill");
+    }
+
+    /// @notice The implied price of a side that filled nothing is zero, not a
+    /// division by zero.
+    ///
+    /// @dev `_assertUniformPrice` skips one-sided batches before calling this,
+    /// so the guard is defence in depth — but it is the guard standing between
+    /// a degenerate pot and a panic inside settlement, and a panic inside
+    /// settlement is permanent on an immutable hook (SR-4).
+    function test_impliedPriceOfNothingIsZero() public pure {
+        assertEq(Clearing.impliedPriceX96(1e18, 0), 0, "price of a zero fill must be zero");
     }
 
     // ======================================================================

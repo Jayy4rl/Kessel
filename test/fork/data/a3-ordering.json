@@ -1,0 +1,60 @@
+{
+  "chainId": 8453,
+  "headBlock": 50748538,
+  "firstBlock": 50748518,
+  "blocksSampled": 12,
+  "totalPairs": 323885,
+  "orderedPairs": 213273,
+  "orderedShareBps": 6584,
+  "adjacentShareBps": 9607,
+  "buckets": [
+    {
+      "maxDistance": 1,
+      "ordered": 2646,
+      "total": 2754,
+      "shareBps": 9607
+    },
+    {
+      "maxDistance": 2,
+      "ordered": 2526,
+      "total": 2742,
+      "shareBps": 9212
+    },
+    {
+      "maxDistance": 4,
+      "ordered": 4694,
+      "total": 5448,
+      "shareBps": 8616
+    },
+    {
+      "maxDistance": 8,
+      "ordered": 8065,
+      "total": 10752,
+      "shareBps": 7500
+    },
+    {
+      "maxDistance": 16,
+      "ordered": 13253,
+      "total": 20928,
+      "shareBps": 6332
+    },
+    {
+      "maxDistance": 32,
+      "ordered": 24390,
+      "total": 39552,
+      "shareBps": 6166
+    },
+    {
+      "maxDistance": 64,
+      "ordered": 42266,
+      "total": 69888,
+      "shareBps": 6047
+    },
+    {
+      "maxDistance": 128,
+      "ordered": 64545,
+      "total": 102912,
+      "shareBps": 6271
+    }
+  ]
+}

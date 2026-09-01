@@ -54,6 +54,13 @@ abstract contract KesselTestBase is Deployers {
     PoolId internal poolId;
     address internal governance = address(0x60F);
 
+    /// @dev Which side the deployment declares as the gas token, selecting the
+    /// Fast-Lane tax mode (DD-4 as amended). Defaults to `NONE` — the rate form
+    /// — so that every test written before the amendment keeps testing exactly
+    /// what it tested. A test that wants the size-denominated form sets this
+    /// before calling `_deployKessel()`.
+    uint8 internal gasTokenSide = 0;
+
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
     address internal carol = address(0xCA401);
@@ -78,7 +85,9 @@ abstract contract KesselTestBase is Deployers {
     function _deployHookAtFlaggedAddress() private {
         address target = address(uint160(KESSEL_FLAGS) | (uint160(0x4444) << 144));
         deployCodeTo(
-            "KesselHook.sol:KesselHook", abi.encode(manager, currency0, currency1, TICK_SPACING, governance), target
+            "KesselHook.sol:KesselHook",
+            abi.encode(manager, currency0, currency1, TICK_SPACING, governance, gasTokenSide),
+            target
         );
         hook = KesselHook(target);
     }
@@ -217,6 +226,7 @@ abstract contract KesselTestBase is Deployers {
     struct OrderView {
         address trader;
         bool zeroForOne;
+        uint64 expiryBlock;
         uint128 amountInRemaining;
         uint128 owedOut;
         uint160 limitPriceX96;

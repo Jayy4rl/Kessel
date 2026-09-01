@@ -54,6 +54,17 @@ struct Order {
     address trader;
     /// @dev True if the trader is selling currency0 for currency1.
     bool zeroForOne;
+    /// @dev Block at or after which the block-age half of the expiry test is
+    /// satisfied. Stamped once, at intake, from the `maxDelay` in force then.
+    ///
+    /// Deliberately a stored stamp rather than a quantity recomputed from the
+    /// live `maxDelay` (SR-10). Recomputing let a governance *increase* of
+    /// `maxDelay` retroactively un-expire an order that `_rollUnfilled` had
+    /// already dropped from every epoch index -- leaving it unfillable (in no
+    /// index) and unredeemable (no longer expired) until the raised floor
+    /// elapsed. A stamp taken at intake can only ever move an order towards
+    /// being refundable, never away from it.
+    uint64 expiryBlock;
     /// @dev Gross input still unfilled. Decreases as the order is partially
     /// filled across epochs.
     uint128 amountInRemaining;
@@ -119,6 +130,9 @@ library KesselErrors {
     error MinOutRequired();
     error AmountTooLarge();
     error ExpiryOutOfRange();
+    /// @dev SR-12: below the Slow Lane's minimum order size for this direction.
+    /// Raised before any custody is taken, so it cannot strand funds.
+    error OrderBelowMinimum();
     /// @dev I9: the warehoused-exposure cap for this direction would be
     /// breached. Denominated in input-token units per currency, because §9
     /// forbids the oracle a common numeraire would need (reconnaissance
@@ -143,6 +157,27 @@ library KesselErrors {
     /// open. See DD-13.
     error SettlementNotDue();
     error NothingToSettle();
+    /// @dev Slow-Lane intake was reached while a settlement or a redemption
+    /// payout was still in flight. Only reachable by reentrancy — no ordinary
+    /// caller can be inside the hook's own `unlock` — so this is a refusal of
+    /// an attack, not of a user.
+    error SettlementInProgress();
+    /// @dev Shape B: the filler delivered less than the curve would have paid
+    /// for the same input. The whole settlement unwinds.
+    error FillerUnderDelivered();
+    /// @dev Shape B: the proposed filler is the hook, the PoolManager, or the
+    /// beneficiary of an order in the batch being filled.
+    error InvalidFiller();
+    /// @dev Shape B: the filler path does not carry native currency. A native
+    /// `take` hands control to the recipient with a bare `call`, and the filler
+    /// path already hands control to an untrusted contract holding the batch's
+    /// input — the combination is not worth the surface. Native pools settle
+    /// against the curve as they always did.
+    error FillerPathRequiresERC20();
+    /// @dev SR-8: the price the batch actually cleared at does not meet the
+    /// limit of an order this settlement was about to fill. I8 is a hard
+    /// bound, so the settlement unwinds rather than filling through it.
+    error LimitPriceBreached();
     /// @dev `_rollUnfilled` was reached without its epoch having been closed
     /// first. Rolling into the epoch about to be deleted would strand every
     /// order in it, so this is checked rather than assumed.
@@ -204,6 +239,16 @@ library KesselEvents {
     /// monitoring watches for a batch that keeps announcing skips instead of
     /// clearing, and `forceSettle` surfaces the actual revert reason.
     event SettlementSkipped(uint32 indexed epoch);
+
+    /// @dev Shape B. `curveFloorOut` is what the pool was predicted to pay for
+    /// the same input and `actualOut` is what the filler delivered; the
+    /// difference is the improvement, and it goes to the traders in the batch.
+    /// Emitted alongside `SlowBatchSettled`, never instead of it, so an analyst
+    /// can measure how much of the Slow Lane's execution quality is coming from
+    /// competition rather than from the curve.
+    event SlowBatchFilledExternally(
+        uint32 indexed epoch, address indexed filler, uint256 amountIn, uint256 curveFloorOut, uint256 actualOut
+    );
 
     event ParameterUpdated(bytes32 indexed param, uint256 oldValue, uint256 newValue);
     event PausedSet(bool paused);

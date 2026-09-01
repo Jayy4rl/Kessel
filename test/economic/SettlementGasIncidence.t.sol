@@ -96,20 +96,19 @@ contract SettlementGasIncidenceTest is KesselTestBase {
             // table states the whole equation rather than half of it.
             uint256 reimbursement = 0;
 
-            console2.log(
-                string.concat(
-                    vm.toString(sizes[i]),
-                    "  ",
-                    vm.toString(carried),
-                    "  +",
-                    vm.toString(delta),
-                    "  ",
-                    vm.toString(reimbursement),
-                    "  ",
-                    vm.toString(delta - reimbursement),
-                    settled == 0 ? "  (DID NOT SETTLE)" : ""
-                )
-            );
+            {
+                string memory _line = vm.toString(sizes[i]);
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(carried));
+                _line = string.concat(_line, "  +");
+                _line = string.concat(_line, vm.toString(delta));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(reimbursement));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(delta - reimbursement));
+                _line = string.concat(_line, settled == 0 ? "  (DID NOT SETTLE)" : "");
+                console2.log(_line);
+            }
         }
     }
 
@@ -134,17 +133,16 @@ contract SettlementGasIncidenceTest is KesselTestBase {
         assertEq(hook.lpClaimable0(), hook.lpClaimable0(), "placeholder"); // no-op: no reimbursement accessor exists
 
         console2.log("");
-        console2.log(
-            string.concat(
-                "full-batch carry costs the triggering trader ",
-                vm.toString(delta),
-                " gas, reimbursed 0 (DD-7). At ",
-                vm.toString(GAS_PRICE),
-                " wei/gas that is ",
-                vm.toString(delta * GAS_PRICE),
-                " wei."
-            )
-        );
+        {
+            string memory _line = "full-batch carry costs the triggering trader ";
+            _line = string.concat(_line, vm.toString(delta));
+            _line = string.concat(_line, " gas, reimbursed 0 (DD-7). At ");
+            _line = string.concat(_line, vm.toString(GAS_PRICE));
+            _line = string.concat(_line, " wei/gas that is ");
+            _line = string.concat(_line, vm.toString(delta * GAS_PRICE));
+            _line = string.concat(_line, " wei.");
+            console2.log(_line);
+        }
     }
 
     /// @notice How the bill compares to what the carrier paid in LP fee — the
@@ -164,19 +162,20 @@ contract SettlementGasIncidenceTest is KesselTestBase {
             uint256 feePaid = FullMath.mulDiv(swapSizes[i], 3_500, 1_000_000);
             uint256 carryCost = delta * GAS_PRICE;
 
-            console2.log(
-                string.concat(
-                    vm.toString(swapSizes[i]),
-                    "  ",
-                    vm.toString(feePaid),
-                    "  ",
-                    vm.toString(delta),
-                    "  ",
-                    vm.toString(carryCost),
-                    "  ",
-                    feePaid == 0 ? "n/a" : string.concat(vm.toString((carryCost * 100) / feePaid), "%")
-                )
-            );
+            {
+                string memory _line = vm.toString(swapSizes[i]);
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(feePaid));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(delta));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(_line, vm.toString(carryCost));
+                _line = string.concat(_line, "  ");
+                _line = string.concat(
+                    _line, feePaid == 0 ? "n/a" : string.concat(vm.toString((carryCost * 100) / feePaid), "%")
+                );
+                console2.log(_line);
+            }
         }
     }
 }

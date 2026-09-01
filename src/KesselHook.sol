@@ -10,6 +10,7 @@ import {BitMath} from "@uniswap/v4-core/src/libraries/BitMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {LiquidityMath} from "@uniswap/v4-core/src/libraries/LiquidityMath.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -90,6 +91,20 @@ contract KesselHook is BaseHook, IUnlockCallback {
     uint256 internal constant K_MIN = 0;
     uint256 internal constant K_MAX = 100_000; // 1 gwei => +10%
 
+    /// @dev Bound on `kGas`, the size-denominated tax multiplier (DD-4 as
+    /// amended). Units are gas, so `kGas * priorityFeePerGas` is an amount of
+    /// wei: at the ceiling, one gwei of priority costs 0.01 ETH of tax. Well
+    /// above any plausible calibration, and the fee cap binds long before it
+    /// on any ordinary trade size.
+    uint256 internal constant K_GAS_MIN = 0;
+    uint256 internal constant K_GAS_MAX = 10_000_000;
+
+    /// @dev `gasTokenSide` values. Fixed at construction because the choice of
+    /// tax mode must not be able to move under a live pool.
+    uint8 internal constant GAS_TOKEN_NONE = 0;
+    uint8 internal constant GAS_TOKEN_CURRENCY0 = 1;
+    uint8 internal constant GAS_TOKEN_CURRENCY1 = 2;
+
     uint32 internal constant MIN_SETTLE_AGE_MIN = 1;
     uint32 internal constant MIN_SETTLE_AGE_MAX = 300;
     uint32 internal constant MAX_DELAY_MIN = 2;
@@ -108,11 +123,39 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// @dev Eligibility rounds for the DD-11 shrinking-set iteration. The set
     /// shrinks monotonically, so this only bounds work, never correctness.
     uint256 internal constant MAX_CLEARING_ROUNDS = 4;
+    /// @dev Consecutive constant-liquidity ranges one settlement may walk when
+    /// solving a batch (gap-4 amendment to DD-5). Bounds gas, never
+    /// correctness: stopping early yields a smaller fill and the remainder
+    /// rolls, exactly as the single-range solver always did.
+    uint256 internal constant MAX_CLEARING_RANGES = 4;
+
+    /// @dev DD-5 residual cap, as a fraction of the analytic break-even. See
+    /// `_residualCap` for the derivation of the break-even itself.
+    ///
+    /// `RESIDUAL_CAP_BPS_MAX = 10_000` is exactly break-even and is a HARD
+    /// deploy-fixed ceiling: no reachable governance setting can place the cap
+    /// above the point where sandwiching the settlement residual turns a
+    /// profit. That is the property that makes this a closure of DD-5 rather
+    /// than a tuning knob — the defence cannot be switched off.
+    ///
+    /// The floor stops governance from setting a cap so tight that a one-sided
+    /// batch needs an unreasonable number of epochs to clear.
+    uint16 internal constant RESIDUAL_CAP_BPS_MIN = 500; // 5% of break-even
+    uint16 internal constant RESIDUAL_CAP_BPS_MAX = 10_000; // 100% = break-even
     /// @dev I4 tolerance. The two sides' implied prices are equal in exact
     /// arithmetic; integer division leaves at most a few wei per pot. Applied
     /// only to two-sided batches with non-dust pots — see `_assertUniformPrice`.
     uint256 internal constant I4_TOLERANCE_PPM = 100; // 0.01%
     uint256 internal constant I4_DUST_FLOOR = 1e6;
+
+    /// @dev I8 tolerance for the post-settlement limit re-check (SR-8). The
+    /// eligibility screen and the realised price are computed from different
+    /// quantities — the sized residual versus the distributed pots — so they
+    /// agree to within integer rounding rather than bit for bit. One part per
+    /// million is several orders of magnitude above that rounding and far
+    /// below any economically meaningful breach, and it is a hundred times
+    /// tighter than the tolerance I4 already runs with.
+    uint256 internal constant I8_TOLERANCE_PPM = 1; // 0.0001%
 
     // ------------------------------------------------------------------
     // Immutable pool binding
@@ -129,6 +172,16 @@ contract KesselHook is BaseHook, IUnlockCallback {
     Currency public immutable currency1;
     int24 public immutable tickSpacing;
 
+    /// @dev Which side of the pool, if either, is the chain's gas token — and
+    /// therefore whether the Fast Lane can use the paper's size-denominated tax
+    /// (DD-4 as amended) or must fall back to the rate form.
+    ///
+    /// Immutable on purpose. The tax mode is a protocol-visible property of the
+    /// deployment, and a governance switch that could flip it under a live pool
+    /// would let the fee schedule change shape without changing a parameter
+    /// anyone is watching.
+    uint8 public immutable gasTokenSide;
+
     // ------------------------------------------------------------------
     // Bounded governance parameters
     // ------------------------------------------------------------------
@@ -138,7 +191,12 @@ contract KesselHook is BaseHook, IUnlockCallback {
 
     uint24 public fBase = 3_000; // 0.30%
     uint24 public fSlow = 500; // 0.05% — I10: strictly below fBase
-    uint256 public k = 500; // DD-4 default: 1 gwei => +5 bp
+    uint256 public k = 500; // DD-4 default (rate form): 1 gwei => +5 bp
+    /// @dev DD-4 as amended: the size-denominated multiplier, in gas units.
+    /// Used only when `gasTokenSide != GAS_TOKEN_NONE`. Default is the rough
+    /// gas cost of a swap, which makes the tax comparable to the priority bid
+    /// the trader is already paying for the same ordering.
+    uint256 public kGas = 150_000;
 
     uint32 public minSettleAge = 2; // blocks (DD-6, guards I6)
     uint32 public maxDelay = 300; // blocks (I11)
@@ -146,11 +204,33 @@ contract KesselHook is BaseHook, IUnlockCallback {
     uint32 public minForceSettleOrders = 2; // DD-13 anti-grief size floor
     uint16 public expiryForfeitBps = 10; // 0.10% (DD-9)
 
+    /// @dev DD-5 (ratified 2026-09-01): how much of the analytic break-even
+    /// residual a single settlement may push through the curve. Default 50%,
+    /// i.e. half the residual at which sandwiching the settlement would start
+    /// to pay, leaving a 2x margin against the model's own error.
+    uint16 public residualCapBps = 5_000;
+
     /// @dev I9: warehoused exposure cap, per direction, denominated in that
     /// direction's *input token units*. A common numeraire would need a price,
     /// and PRD §9 forbids an oracle (reconnaissance finding C).
     uint128 public maxWarehouse0 = type(uint128).max;
     uint128 public maxWarehouse1 = type(uint128).max;
+
+    /// @dev SR-12: floor on a single Slow-Lane order, per direction, in that
+    /// direction's own input-token units — same reasoning as the warehouse
+    /// caps above, and for the same reason it cannot be one number.
+    ///
+    /// Defaults to zero, i.e. off, exactly as `maxWarehouse*` defaults to its
+    /// own no-op. There is no unit-independent default worth shipping: a floor
+    /// meaningful on an 18-decimal pool is nonsense on a 6-decimal one, so this
+    /// is a value the deployer must set with the pair in front of them.
+    ///
+    /// The floor applies at INTAKE ONLY. A partial fill can leave an order's
+    /// remainder below it, and that remainder must keep rolling and stay
+    /// redeemable — applying the floor to rolling would strand exactly the
+    /// orders the protocol has already taken custody of.
+    uint128 public minOrderSize0;
+    uint128 public minOrderSize1;
 
     // ------------------------------------------------------------------
     // Order book and epoch state
@@ -196,7 +276,8 @@ contract KesselHook is BaseHook, IUnlockCallback {
     enum UnlockAction {
         SETTLE,
         REDEEM,
-        SWEEP
+        SWEEP,
+        SETTLE_WITH_FILL
     }
 
     modifier onlyGovernance() {
@@ -209,21 +290,44 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// @param _currency1 Higher-sorted currency of the served pool.
     /// @param _tickSpacing Tick spacing of the served pool.
     /// @param _governance Initial parameter authority.
+    /// @param _gasTokenSide Which currency is the chain's gas token: 0 neither,
+    /// 1 currency0, 2 currency1. Selects the Fast-Lane tax mode (DD-4 as
+    /// amended) and cannot be changed afterwards.
     ///
     /// @dev The pool key is fixed here rather than learned at initialize time
     /// because the hook has no `beforeInitialize` permission — the bitmap is
     /// frozen by DD-8 and adding one would change this contract's address. The
     /// fee field is always `DYNAMIC_FEE_FLAG` (PRD §8.1).
+    ///
+    /// `_gasTokenSide` is asserted by the deployer rather than derived, because
+    /// the gas token is not always the native currency: on a pool quoted in
+    /// WETH the ETH-equivalent side is an ERC-20 that this contract cannot
+    /// recognise. Declaring a side that is *not* gas-token-equivalent
+    /// mis-denominates the tax — it does not break custody or any invariant,
+    /// but it silently mis-prices the Fast Lane, so it is checked at deploy
+    /// time where it can still be fixed. Passing 0 is always safe and selects
+    /// the rate form.
     constructor(
         IPoolManager _poolManager,
         Currency _currency0,
         Currency _currency1,
         int24 _tickSpacing,
-        address _governance
+        address _governance,
+        uint8 _gasTokenSide
     ) BaseHook(_poolManager) {
         // Same reasoning as `setGovernance`: an immutable hook deployed with no
         // governance can never have a parameter changed again.
         if (_governance == address(0)) revert KesselErrors.ParameterOutOfBounds();
+        if (_gasTokenSide > GAS_TOKEN_CURRENCY1) revert KesselErrors.ParameterOutOfBounds();
+
+        // The native currency is address(0) and is always currency0 when
+        // present, so declaring currency1 as the gas token while currency0 is
+        // native is contradictory on its face and is refused. Every other
+        // combination is a deployer assertion this contract cannot check.
+        if (_gasTokenSide == GAS_TOKEN_CURRENCY1 && _currency0.isAddressZero()) {
+            revert KesselErrors.ParameterOutOfBounds();
+        }
+        gasTokenSide = _gasTokenSide;
 
         currency0 = _currency0;
         currency1 = _currency1;
@@ -295,7 +399,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
 
         if (lane == Lane.FAST) {
             uint256 priorityFee = FastLaneFee.priorityFeePerGas();
-            uint24 feeCharged = FastLaneFee.fee(fBase, k, priorityFee, MAX_FAST_FEE);
+            uint24 feeCharged = _fastFee(params, priorityFee);
 
             emit KesselEvents.LaneChosen(sender, Lane.FAST);
             emit KesselEvents.FastSwap(
@@ -319,6 +423,34 @@ contract KesselHook is BaseHook, IUnlockCallback {
         }
 
         return _openSlowOrder(key, params, trader, minOut, expiryEpochs);
+    }
+
+    /// @dev The Fast-Lane fee for this swap, in whichever tax mode this
+    /// deployment was fixed to (DD-4 as amended).
+    ///
+    /// The size-denominated mode falls back to the rate form whenever the size
+    /// cannot be established — a degenerate or out-of-range price. Falling back
+    /// is the safe direction: the rate form never under-charges relative to a
+    /// size it could not compute, whereas treating an unknown size as large
+    /// would hand out a cheap swap.
+    ///
+    /// I12 holds in both branches and the branch does not depend on
+    /// `priorityFee`, so no monotonicity break can occur between them.
+    function _fastFee(
+        SwapParams calldata params,
+        uint256 priorityFee
+    ) private view returns (uint24) {
+        uint8 side = gasTokenSide;
+
+        if (side != GAS_TOKEN_NONE) {
+            (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
+            (bool ok, uint256 sizeWei) = FastLaneFee.sizeInGasToken(
+                params.zeroForOne, params.amountSpecified, sqrtPriceX96, side == GAS_TOKEN_CURRENCY0
+            );
+            if (ok) return FastLaneFee.feeBySize(fBase, kGas, priorityFee, sizeWei, MAX_FAST_FEE);
+        }
+
+        return FastLaneFee.fee(fBase, k, priorityFee, MAX_FAST_FEE);
     }
 
     /// @dev Slow-Lane intake: escrow the input, issue a claim, execute nothing.
@@ -346,6 +478,32 @@ contract KesselHook is BaseHook, IUnlockCallback {
     ) private returns (bytes4, BeforeSwapDelta, uint24) {
         if (paused) revert KesselErrors.Paused();
 
+        // Intake is closed while a settlement or a redemption payout is in
+        // flight, and this is load-bearing rather than defensive.
+        //
+        // `_executeResidualViaFiller` hands control to an untrusted contract
+        // with the settlement half-finished: the epoch is closed and the
+        // residual executed, but the fills, epoch record, recapture and roll
+        // have not happened. `_settling` already stops that contract from
+        // reentering settlement, and v4's nested-`unlock` prohibition stops
+        // `redeem`, `forceSettle` and `sweepRecapture`. Intake is the one
+        // mutating path neither of those covers, because `poolManager.swap` is
+        // `onlyWhenUnlocked` rather than `onlyByTheUnlocker` — the same
+        // asymmetry SR-6 turned on — so a filler may call it directly, land
+        // here, and write `warehoused*`, `orders`, `epochOrderIds` and
+        // `currentEpoch` underneath a settlement still reading them.
+        //
+        // No concrete corruption was found by construction, and that is
+        // precisely why this is a check rather than an argument in a comment:
+        // SR-4 is the standing reminder that "unreachable by argument" is not
+        // the same as unreachable, and this contract cannot be patched.
+        //
+        // Nothing legitimate is refused. The hook's own residual swap does not
+        // reach `beforeSwap` at all — v4 skips a hook's callbacks when the hook
+        // is the caller — so the only way to arrive here with `_settling` set
+        // is from inside someone else's reentrancy.
+        if (_settling) revert KesselErrors.SettlementInProgress();
+
         // v4's async pattern is exact-input only (PRD §3.2); exact-output Slow
         // orders are out of scope (§17).
         if (params.amountSpecified >= 0) revert KesselErrors.SlowLaneRequiresExactInput();
@@ -363,6 +521,29 @@ contract KesselHook is BaseHook, IUnlockCallback {
         uint256 amountIn256 = uint256(-params.amountSpecified);
         if (amountIn256 > type(uint128).max) revert KesselErrors.AmountTooLarge();
         uint128 amountIn = uint128(amountIn256);
+
+        // SR-12. The Slow Lane's per-epoch work cap is a fixed number of
+        // ORDERS, not a quantity of value, so the cheapest way to consume it is
+        // with orders that carry no value at all: 32 dust orders whose limit
+        // price the market can never reach cost a wei each, are dropped by the
+        // eligibility screen every settlement, and roll to the head of the next
+        // batch for as long as their expiry allows — displacing real orders
+        // into later epochs and billing the repricing to whichever Fast-Lane
+        // trader carries it.
+        //
+        // A size floor is the right lever because it prices the attack in the
+        // attacker's own locked capital, which is the one cost that scales with
+        // how long they keep it up, and it is taxed again by the expiry forfeit
+        // on the way out. The alternatives — charging repeatedly-dropped
+        // orders, or capping how many times an order may roll — both reopen
+        // DD-9's free-option analysis and DD-11's rolling policy, which is a
+        // large bill for a throughput grief.
+        //
+        // It also only makes explicit a floor the fill arithmetic already
+        // imposes: `_computeFills` drops any order whose filled amount rounds
+        // to zero, so a sufficiently small order was never fillable anyway.
+        uint128 floorSize = zeroForOne ? minOrderSize0 : minOrderSize1;
+        if (amountIn < floorSize) revert KesselErrors.OrderBelowMinimum();
 
         _checkAndBookWarehouse(zeroForOne, amountIn);
 
@@ -399,9 +580,15 @@ contract KesselHook is BaseHook, IUnlockCallback {
         uint32 expiry = epoch + expiryEpochs;
         orderId = nextOrderId++;
 
+        // SR-10: the block-age half of the expiry test, stamped now rather than
+        // recomputed later from the live `maxDelay`. See `Order.expiryBlock`.
+        uint256 floorBlocks = maxDelay < EXPIRY_BLOCK_FLOOR_MAX ? maxDelay : EXPIRY_BLOCK_FLOOR_MAX;
+        uint64 expiryBlock = uint64(epochs[epoch].openedAtBlock + floorBlocks);
+
         orders[orderId] = Order({
             trader: trader,
             zeroForOne: zeroForOne,
+            expiryBlock: expiryBlock,
             amountInRemaining: amountIn,
             owedOut: 0,
             limitPriceX96: uint160(limit),
@@ -500,7 +687,86 @@ contract KesselHook is BaseHook, IUnlockCallback {
         uint32 epoch = oldestUnsettledEpoch;
         if (!_forceSettleDue(epoch)) revert KesselErrors.SettlementNotDue();
 
-        poolManager.unlock(abi.encode(UnlockAction.SETTLE, epoch, uint256(0)));
+        poolManager.unlock(abi.encode(UnlockAction.SETTLE, epoch, uint256(0), uint256(0)));
+    }
+
+    /// @notice Settle the oldest unsettled batch against tokens the caller has
+    /// already delivered, taking the better of that delivery and the curve
+    /// (Shape B).
+    ///
+    /// @dev **The caller states the delivery and approves this contract to pull
+    /// it.** There is no callback. The hook pulls exactly `delivered` of the
+    /// output currency from `msg.sender` straight into the singleton, refuses
+    /// anything below what the curve would have paid, completes every state
+    /// write, and pays the caller the batch's input *last*.
+    ///
+    /// That ordering is the whole point, and it is a deliberate reversal of the
+    /// obvious design. Paying the filler first and calling back into it would
+    /// be more convenient — the filler could source the output using the very
+    /// input it is being paid — but it puts an untrusted call in the middle of
+    /// a half-finished settlement, with the epoch closed and the residual
+    /// executed but the fills, epoch record, recapture and roll still pending.
+    /// Pulling removes that window rather than guarding it: a `transferFrom`
+    /// hands control to the *token*, not to the filler.
+    ///
+    /// Nothing is lost by it. A filler with inventory approves and is pulled
+    /// from; a filler without one wraps this call in its own flash loan from
+    /// anywhere else, is pulled from, is paid, and repays. The atomicity moves
+    /// outside Kessel instead of being manufactured inside it.
+    ///
+    /// SR-9. This used to be a *deliver-first* interface: transfer the tokens
+    /// in, then call, and the hook took `balanceOfSelf()` to be the delivery.
+    /// Two things were wrong with that, and they composed.
+    ///
+    ///  * `balanceOfSelf()` is unattributed. It is whatever anyone has ever
+    ///    sent this contract, so a filler could satisfy the curve floor out of
+    ///    someone else's tokens and be paid the batch's input for free.
+    ///  * A settlement that turned out to be a no-op — every order dropped for
+    ///    limit ineligibility, an infeasible pool, a candidate set that emptied
+    ///    — returned *without reverting*, so the delivery was never banked,
+    ///    never refunded, and simply stayed on the contract as the next
+    ///    filler's free capital. An attacker could force that state by moving
+    ///    the price ahead of an honest filler's transaction and then collect.
+    ///
+    /// Pulling a declared amount makes attribution exact, and the `filled`
+    /// check below turns a no-op into a revert that returns the delivery.
+    ///
+    /// @param delivered Exact amount of the output currency to pull from the
+    /// caller. Read `quoteFill()` for the currency and the floor; anything at
+    /// or above the floor is accepted, but see `_assertLimitsHeld` — a delivery
+    /// so far above it that the batch's other side is pushed through its own
+    /// limit price is refused rather than filled.
+    ///
+    /// Permissionless, and the caller pays its own gas with no reimbursement,
+    /// for the same reason `forceSettle` has none (DD-7).
+    ///
+    /// Gated on the piggyback clock rather than the forced one. A filler is not
+    /// a grief vector the way repeated tiny forced settlements are — it fronts
+    /// capital to deliver a strictly better price than the curve — so making it
+    /// wait for `maxDelay` would only withhold the improvement. `minSettleAge`
+    /// still applies, so this cannot approximate submission-time pricing and I6
+    /// is untouched.
+    ///
+    /// Like `forceSettle`, this opens its OWN `unlock` (PRD §8.3).
+    function settleWithFill(
+        uint256 delivered
+    ) external {
+        if (paused) revert KesselErrors.Paused();
+
+        // Restricted to ERC-20 pools. A native `take` pays the recipient with a
+        // bare `call`, and the payout leg here is to a caller-controlled
+        // address; native pools settle against the curve as they always did.
+        if (currency0.isAddressZero() || currency1.isAddressZero()) {
+            revert KesselErrors.FillerPathRequiresERC20();
+        }
+        if (msg.sender == address(this) || msg.sender == address(poolManager)) {
+            revert KesselErrors.InvalidFiller();
+        }
+
+        uint32 epoch = oldestUnsettledEpoch;
+        if (!_piggybackDue(epoch)) revert KesselErrors.SettlementNotDue();
+
+        poolManager.unlock(abi.encode(UnlockAction.SETTLE_WITH_FILL, epoch, uint256(uint160(msg.sender)), delivered));
     }
 
     /// @inheritdoc IUnlockCallback
@@ -509,12 +775,27 @@ contract KesselHook is BaseHook, IUnlockCallback {
     ) external override returns (bytes memory) {
         if (msg.sender != address(poolManager)) revert KesselErrors.NotPoolManager();
 
-        (UnlockAction action, uint32 epoch, uint256 orderId) = abi.decode(data, (UnlockAction, uint32, uint256));
+        // One uniform payload for every action. `SETTLE_WITH_FILL` carries the
+        // filler in the slot the redemption path uses for an order id, and its
+        // declared delivery in the fourth; every other action leaves both zero.
+        (UnlockAction action, uint32 epoch, uint256 arg, uint256 arg2) =
+            abi.decode(data, (UnlockAction, uint32, uint256, uint256));
+
+        if (action == UnlockAction.SETTLE_WITH_FILL) {
+            // A settlement that could not run is a REVERT on this path, never a
+            // silent return: the caller's delivery has to come back with it
+            // (SR-9). The piggyback path keeps the opposite convention on
+            // purpose — there, a no-op must not take the carrying swap down.
+            if (!_settleEpochInner(epoch, address(uint160(arg)), arg2)) {
+                revert KesselErrors.NothingToSettle();
+            }
+            return "";
+        }
 
         if (action == UnlockAction.SETTLE) {
             _settleEpoch(epoch);
         } else if (action == UnlockAction.REDEEM) {
-            _payoutOrder(orderId);
+            _payoutOrder(arg);
         } else {
             _sweep();
         }
@@ -530,14 +811,35 @@ contract KesselHook is BaseHook, IUnlockCallback {
     function _settleEpoch(
         uint32 epoch
     ) private {
-        if (_settling) return;
+        _settleEpochInner(epoch, address(0), 0);
+    }
+
+    /// @dev The settlement core. `filler` is `address(0)` on the curve path,
+    /// which is every path that existed before Shape B; a non-zero filler makes
+    /// the residual execute against that contract instead, subject to a floor
+    /// of what the curve would have paid.
+    ///
+    /// Everything downstream of the residual is identical either way, and
+    /// deliberately so: pots, fill ratio, uniform-price assertion and payout do
+    /// not know or care where the tokens came from. That is what makes the
+    /// amendment small — `Clearing.fillRatio` already made solvency independent
+    /// of the counterparty, so a second counterparty needs no new accounting.
+    /// @return settled True when the batch reached distribution. False is a
+    /// refusal, not a failure: the curve paths treat it as a no-op, and the
+    /// filler path turns it into a revert so the delivery is returned (SR-9).
+    function _settleEpochInner(
+        uint32 epoch,
+        address filler,
+        uint256 delivered
+    ) private returns (bool settled) {
+        if (_settling) return false;
         _settling = true;
 
         Cand[] memory c = _loadCandidates(epoch);
         if (c.length == 0) {
             _advanceIfDrained(epoch);
             _settling = false;
-            return;
+            return false;
         }
 
         // ---- DD-11 shrinking-set iteration -------------------------------
@@ -570,11 +872,60 @@ contract KesselHook is BaseHook, IUnlockCallback {
                 _rollUnfilled(epoch);
             }
             _settling = false;
-            return;
+            return false;
         }
 
-        _executeAndDistribute(epoch, c, sol, net0, net1);
+        if (filler != address(0)) _assertFillerNotInBatch(c, filler);
+
+        _executeAndDistribute(epoch, c, sol, net0, net1, filler, delivered);
+
+        // The filler is paid LAST, after every state write this settlement
+        // makes. That is checks-effects-interactions in the order it is
+        // supposed to be in, and it is the reason there is no untrusted call
+        // anywhere in the middle of this function: the delivery arrived before
+        // `settleWithFill` was even entered.
+        //
+        // `_settling` is still held here, so a filler that takes control on
+        // receipt finds settlement closed, intake refused, and every path that
+        // needs its own `unlock` unavailable. It also finds nothing left to
+        // corrupt, which is the part that matters.
+        if (filler != address(0) && sol.residualIn > 0) {
+            Currency inCurrency = sol.zeroForOne ? currency0 : currency1;
+            inCurrency.settle(poolManager, address(this), sol.residualIn, true);
+            poolManager.take(inCurrency, filler, sol.residualIn);
+        }
+
         _settling = false;
+        return true;
+    }
+
+    /// @dev Shape B self-dealing guard: a filler may not be the beneficiary of
+    /// an order in the batch it is filling.
+    ///
+    /// This is defence in depth, not the primary defence. The primary defence
+    /// is the floor: every order is paid from a pot that is at least what the
+    /// curve would have produced, so a self-dealing filler cannot pay itself
+    /// less than it would have received by letting the settlement run normally.
+    /// The guard exists because that argument is about *prices*, and an
+    /// immutable contract should not rest a whole class of abuse on a pricing
+    /// argument when an identity check costs one pass over 32 entries.
+    ///
+    /// Restricted to candidates still `live` after the eligibility screen
+    /// (SR-11). Applied to every loaded candidate it was a cheap censorship
+    /// primitive: `hookData` lets a submitter name ANY beneficiary, so one dust
+    /// order naming a competitor — with a limit price the market can never
+    /// reach, so it costs nothing and never fills — locked that address out of
+    /// `settleWithFill` for the life of the batch, and rolled forward with it.
+    /// An order that was screened out is not part of the batch being filled and
+    /// has no self-dealing to guard against.
+    function _assertFillerNotInBatch(
+        Cand[] memory c,
+        address filler
+    ) private view {
+        for (uint256 i; i < c.length; ++i) {
+            if (!c[i].live) continue;
+            if (orders[c[i].id].trader == filler) revert KesselErrors.InvalidFiller();
+        }
     }
 
     /// @dev Snapshot of one fillable order, held in memory for the duration of
@@ -641,13 +992,11 @@ contract KesselHook is BaseHook, IUnlockCallback {
     function _solveEligibleSet(
         Cand[] memory c
     ) private view returns (Clearing.Solution memory sol, uint256 net0, uint256 net1, bool converged) {
-        Clearing.PoolPoint memory p = _poolPoint();
-
         for (uint256 round; round < MAX_CLEARING_ROUNDS; ++round) {
             (net0, net1) = _aggregateNet(c);
             if (net0 == 0 && net1 == 0) return (sol, 0, 0, true);
 
-            sol = Clearing.solve(p, net0, net1);
+            sol = _solveMultiRange(net0, net1);
             if (!sol.feasible) return (sol, net0, net1, false);
 
             if (_dropIneligible(c, sol.priceX96) == 0) return (sol, net0, net1, true);
@@ -655,6 +1004,271 @@ contract KesselHook is BaseHook, IUnlockCallback {
 
         // Round budget exhausted without a self-consistent set.
         return (sol, net0, net1, false);
+    }
+
+    /// @dev Solve the batch across up to `MAX_CLEARING_RANGES` consecutive
+    /// constant-liquidity ranges (gap-4 amendment to DD-5).
+    ///
+    /// `Clearing.solve` is exact only inside one range, because the closed form
+    /// assumes constant `L`. Previously that meant a batch big enough to reach
+    /// an initialised tick was clamped to the boundary and partially filled,
+    /// with the remainder rolling to the next epoch — so a large order could
+    /// take several settlements to complete for no reason other than the
+    /// solver's own horizon.
+    ///
+    /// This walks instead. Each iteration calls `solve` with that range's own
+    /// liquidity and whatever of the batch is still unfilled, then crosses the
+    /// boundary tick exactly as v4's own swap loop does — negating
+    /// `liquidityNet` when moving down, and stepping the tick to `next - 1` in
+    /// that direction. Every `solve` call therefore still sees a single
+    /// constant-`L` range and stays exact.
+    ///
+    /// The walk only has to produce a good *target*: `Clearing.fillRatio`
+    /// derives the actual fill from what the pool really did, so an imprecise
+    /// prediction costs a smaller fill, never solvency (I2) and never a
+    /// non-uniform price (I4). That is why an iterative approximation is
+    /// admissible here at all.
+    ///
+    /// The residual direction cannot flip between ranges: both sides of the
+    /// batch scale by the same `lambda`, so a batch that is net-selling
+    /// currency0 stays net-selling currency0 however much of it is consumed.
+    /// @dev DD-5's closure: the largest residual this settlement may push
+    /// through the curve, in the residual's own input currency.
+    ///
+    /// ## The derivation
+    ///
+    /// `docs/DD5-SIMULATION.md` measured, against the real contracts, that
+    /// sandwiching the settlement residual is profitable at every reachable
+    /// `k`. Its extraction model is
+    ///
+    ///     extraction  =  2 * y * A * R / x^2          (in currency1)
+    ///
+    /// for an attacker size `A` and a residual `R`, against the attacker's own
+    /// cost of `f_base` on each of two legs,
+    ///
+    ///     cost        =  2 * f_base * A * y / x .
+    ///
+    /// **`A` appears linearly on both sides and cancels.** Whether the attack
+    /// pays is therefore not a question about the attacker's size, or about
+    /// `k`, or about how much slack traders left in their limits — it is
+    /// decided by the residual alone:
+    ///
+    ///     unprofitable   <=>   R  <=  f_base * x
+    ///
+    /// where `x` is the pool's virtual reserve of the residual's input currency.
+    /// Checked against the simulation's own sweep: the analytic break-even is
+    /// 0.285 ether and the measured one 0.301 ether on a 95-ether-deep pool, a
+    /// 5% agreement with no fitting.
+    ///
+    /// ## Why this and not the other three options
+    ///
+    /// The simulation outlines four closures and recommends the first, a
+    /// begin-of-epoch price band, as "the only one that bounds the attack
+    /// independently of both trader behaviour and `k`". The cancellation above
+    /// shows this one does too, and it costs materially less:
+    ///
+    ///  * A price band anchored at epoch open would tell a trader submitting
+    ///    into a fresh epoch that their fill lands within `±delta` of the price
+    ///    they can see. That is a two-sided bound known at submission, which is
+    ///    precisely the hedging surface I6 exists to close. This cap carries no
+    ///    submission-time information at all: it is a function of settlement-
+    ///    time liquidity and price.
+    ///  * A price band's failure mode is *refuse to settle*, which fights I11
+    ///    and needs the `absoluteMaxDelay` escape re-argued. This cap's failure
+    ///    mode is *fill less of the batch this epoch*, which is the partial-fill
+    ///    path DD-11 already specifies, SR-1 already made safe, and the tick
+    ///    clamp already exercises on every large batch.
+    ///  * A floor on limit tightness (option 3) refuses orders traders meant to
+    ///    place, and makes the defence depend on tuning against trader
+    ///    behaviour rather than against pool state.
+    ///
+    /// The cap constrains only the *un-netted* part of a batch. Extraction on
+    /// the coincidence-of-wants portion is exactly zero — the simulation
+    /// measures it as such — so netting is left entirely unconstrained and the
+    /// mechanism's own best case is untouched.
+    ///
+    /// @param sqrtPriceX96 Settlement-time price.
+    /// @param liquidity Active liquidity in the range being solved.
+    /// @param zeroForOne Direction of the residual.
+    function _residualCap(
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        bool zeroForOne
+    ) private view returns (uint256) {
+        if (liquidity == 0 || sqrtPriceX96 == 0) return 0; // uncapped: nothing to trade against
+
+        // Virtual reserve of the residual's INPUT currency:
+        //   currency0 (zeroForOne):  x = L / sqrtP  =  L * Q96 / sqrtPriceX96
+        //   currency1 (oneForZero):  y = L * sqrtP  =  L * sqrtPriceX96 / Q96
+        uint256 reserve =
+            zeroForOne ? FullMath.mulDiv(liquidity, Q96, sqrtPriceX96) : FullMath.mulDiv(liquidity, sqrtPriceX96, Q96);
+
+        // R_max = f_base * reserve * residualCapBps, with f_base in v4 fee
+        // units (1e6) and the safety factor in bps (1e4).
+        uint256 cap = FullMath.mulDiv(reserve, uint256(fBase) * residualCapBps, FEE_DENOMINATOR * BPS_DENOMINATOR);
+
+        // A cap of zero would read as "uncapped" downstream. One wei is the
+        // correct floor: it caps hard without ever disabling the bound.
+        return cap == 0 ? 1 : cap;
+    }
+
+    function _solveMultiRange(
+        uint256 net0,
+        uint256 net1
+    ) private view returns (Clearing.Solution memory out) {
+        (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
+        uint128 liquidity = poolManager.getLiquidity(poolId);
+
+        uint256 rem0 = net0;
+        uint256 rem1 = net1;
+
+        // DD-5's cap is a bound on the TOTAL residual this settlement pushes
+        // through the curve, so it is sized once against the depth at spot and
+        // then spent down across the walk. The residual's direction follows
+        // from the batch alone — the curve is sold currency0 exactly when the
+        // batch is net-selling it — and cannot flip between ranges, because
+        // both sides scale by the same lambda.
+        uint256 capBudget;
+        {
+            uint256 spotX96 = FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
+            bool residualZeroForOne = net1 < FullMath.mulDiv(net0, spotX96, Q96);
+            capBudget = _residualCap(sqrtPriceX96, liquidity, residualZeroForOne);
+        }
+
+        for (uint256 r; r < MAX_CLEARING_RANGES; ++r) {
+            (int24 lowerTick, int24 upperTick) = _activeRangeTicks(tick);
+
+            Clearing.Solution memory seg = Clearing.solve(
+                Clearing.PoolPoint({
+                    sqrtPriceX96: sqrtPriceX96,
+                    liquidity: liquidity,
+                    lowerSqrtPriceX96: TickMath.getSqrtPriceAtTick(lowerTick),
+                    upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(upperTick),
+                    maxResidualIn: capBudget
+                }),
+                rem0,
+                rem1
+            );
+
+            // An infeasible range ends the walk. Anything already accumulated
+            // stands: a partial answer is a valid target, and it is strictly
+            // better than the single-range answer it started from.
+            if (!seg.feasible) break;
+
+            out.feasible = true;
+            out.zeroForOne = seg.zeroForOne;
+            out.sqrtPriceTargetX96 = seg.sqrtPriceTargetX96;
+            out.residualIn += seg.residualIn;
+            out.residualOut += seg.residualOut;
+            out.clamped = seg.clamped;
+
+            // Unclamped: the whole remaining batch cleared inside this range,
+            // which is the terminating case and the common one.
+            if (!seg.clamped) break;
+
+            // Clamped with nothing moving means the range had no room at all.
+            if (seg.residualIn == 0 || seg.residualOut == 0) break;
+
+            // The cap is a budget for the whole walk, not for each range.
+            capBudget = capBudget > seg.residualIn ? capBudget - seg.residualIn : 0;
+            if (capBudget == 0) break; // DD-5 bound reached; the rest rolls.
+
+            uint256 lambda = seg.zeroForOne
+                ? Clearing.fillRatio(rem0, rem1, seg.residualIn, seg.residualOut)
+                : Clearing.fillRatio(rem1, rem0, seg.residualIn, seg.residualOut);
+            // `0` is an inconsistent fill and `Q96` is a complete one; neither
+            // leaves a remainder for a further range to absorb.
+            if (lambda == 0 || lambda >= Q96) break;
+
+            rem0 -= FullMath.mulDiv(rem0, lambda, Q96);
+            rem1 -= FullMath.mulDiv(rem1, lambda, Q96);
+            if (rem0 == 0 && rem1 == 0) break;
+
+            // Cross the boundary. An uninitialised tick — which is what a
+            // bitmap-word edge is — reports a zero `liquidityNet`, so this
+            // correctly leaves liquidity untouched and simply continues the
+            // scan from further along. No special case is needed for it.
+            int24 crossed = seg.zeroForOne ? lowerTick : upperTick;
+            (, int128 liquidityNet) = poolManager.getTickLiquidity(poolId, crossed);
+            if (seg.zeroForOne) liquidityNet = -liquidityNet;
+            liquidity = LiquidityMath.addDelta(liquidity, liquidityNet);
+            if (liquidity == 0) break; // no depth beyond this tick
+
+            sqrtPriceX96 = seg.sqrtPriceTargetX96;
+            tick = seg.zeroForOne ? crossed - 1 : crossed;
+        }
+
+        if (!out.feasible) return out;
+        out.priceX96 = _predictedPrice(out, net0, net1);
+        if (out.priceX96 == 0) out.feasible = false;
+    }
+
+    /// @dev The uniform price the walk predicts, taken from the residual itself.
+    ///
+    /// `a * b` is the average price of a move within *one* constant-liquidity
+    /// range, and is simply not the average once the walk has crossed a tick.
+    /// So the price has to come from the trade the walk actually sized.
+    ///
+    /// It comes from the residual and nothing else:
+    ///
+    ///   zeroForOne residual:  P = residualOut / residualIn   (pool pays c1)
+    ///   oneForZero residual:  P = residualIn  / residualOut  (pool takes c1)
+    ///
+    /// This is exact for any number of ranges AND for any fill ratio, which is
+    /// the property that matters. `Clearing.fillRatio`'s own algebra gives it
+    /// directly: equalising the two sides' implied prices yields `P = Y / X`
+    /// for the realised `(X, Y)`, with the batch totals cancelling out entirely.
+    ///
+    /// SR-8. This function previously used the *totals* identity —
+    /// `P = (residualOut + N1) / N0` and `P = (N1 - residualIn) / N0` — which
+    /// is the solvency relation **at a fill ratio of one**. The general
+    /// relation carries lambda: `P = (Y + lambda*N1) / (lambda*N0)`. Whenever a
+    /// batch was clamped (bigger than the depth the walk could absorb), lambda
+    /// was dropped and the eligibility price came out wrong by a factor of
+    /// roughly 1/lambda — understated for a zeroForOne residual, overstated for
+    /// a oneForZero one, i.e. wrong in the unsafe direction for exactly the
+    /// side whose limit was the binding one. `_dropIneligible` then admitted
+    /// orders that the realised price did not satisfy and they were filled
+    /// through their `minOut`, breaking I8. Solvency was never affected —
+    /// `fillRatio` guarantees I2 and I4 whatever the prediction says — which is
+    /// why no invariant caught it.
+    ///
+    /// The single-range predecessor (`Clearing.solve`'s `a * b`) was correct
+    /// under clamping, because `a * b` IS `Y / X`. The multi-range amendment
+    /// replaced a correct formula with one that only held in the unclamped
+    /// case; this restores the property while keeping the multi-range answer.
+    ///
+    /// This is a prediction used for the eligibility test only. Payouts are
+    /// computed from what the pool actually returned, so a prediction that is
+    /// a few wei off costs an order its place in this batch at worst, never
+    /// solvency.
+    function _predictedPrice(
+        Clearing.Solution memory out,
+        uint256 net0,
+        uint256 net1
+    ) private pure returns (uint160) {
+        // A perfectly matched batch never touches the curve, so the totals
+        // identity degenerates. Its price is the coincidence-of-wants price.
+        if (out.residualIn == 0) {
+            if (net0 == 0) return 0;
+            return _toUint160(FullMath.mulDiv(net1, Q96, net0));
+        }
+
+        // A residual that moves in one direction only cannot imply a price.
+        if (out.residualOut == 0) return 0;
+
+        // `P = Y / X`, in currency1-per-currency0 both ways round: the pool
+        // pays currency1 for a zeroForOne residual and takes it for the other.
+        if (out.zeroForOne) {
+            return _toUint160(FullMath.mulDiv(out.residualOut, Q96, out.residualIn));
+        }
+        return _toUint160(FullMath.mulDiv(out.residualIn, Q96, out.residualOut));
+    }
+
+    function _toUint160(
+        uint256 x
+    ) private pure returns (uint160) {
+        return x > type(uint160).max ? type(uint160).max : uint160(x);
     }
 
     /// @dev Aggregate net-of-fee input per direction over the live candidates.
@@ -678,9 +1292,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
         Cand[] memory c,
         uint160 priceX96
     ) private view returns (uint256 dropped) {
-        uint24 slowFee = fSlow;
-        uint256 effZeroForOne = FullMath.mulDiv(priceX96, FEE_DENOMINATOR - slowFee, FEE_DENOMINATOR);
-        uint256 effOneForZero = FullMath.mulDiv(priceX96, FEE_DENOMINATOR, FEE_DENOMINATOR - slowFee);
+        (uint256 effZeroForOne, uint256 effOneForZero) = _effectivePrices(priceX96);
 
         for (uint256 i; i < c.length; ++i) {
             if (!c[i].live) continue;
@@ -694,18 +1306,108 @@ contract KesselHook is BaseHook, IUnlockCallback {
         }
     }
 
+    /// @dev The price each side actually realises at a batch price of
+    /// `priceX96`, once `f_slow` is applied. A currency0 seller receives
+    /// `P * (1 - f)`; a currency1 seller pays `P / (1 - f)`.
+    ///
+    /// Shared by the eligibility screen and the post-settlement re-check so the
+    /// two can never disagree about what "effective price" means.
+    function _effectivePrices(
+        uint256 priceX96
+    ) private view returns (uint256 effZeroForOne, uint256 effOneForZero) {
+        uint256 slowFee = fSlow;
+        effZeroForOne = FullMath.mulDiv(priceX96, FEE_DENOMINATOR - slowFee, FEE_DENOMINATOR);
+        effOneForZero = FullMath.mulDiv(priceX96, FEE_DENOMINATOR, FEE_DENOMINATOR - slowFee);
+    }
+
+    /// @dev I8, enforced against the price the batch REALLY cleared at.
+    ///
+    /// `_dropIneligible` screens against `sol.priceX96`, which is a prediction
+    /// made before the residual executed. Payouts come from the pots, so the
+    /// realised price is `pot1 / filled0` (equivalently `filled1 / pot0` — I4
+    /// says these agree). Nothing structurally forces the two to match:
+    ///
+    ///  * on the curve path they differ by integer rounding, and by more than
+    ///    that if the multi-range walk mispredicts the pool's own swap loop;
+    ///  * on the filler path a delivery ABOVE the curve floor moves the
+    ///    realised price up. That is an improvement for the currency0 sellers
+    ///    and, by the same amount, a *deterioration* for the currency1 sellers
+    ///    on the other side of the same batch, whose limit is a ceiling. A
+    ///    filler could otherwise improve one side straight through the other
+    ///    side's stated `minOut` (SR-9).
+    ///
+    /// So the screen is re-run against the realised price and the settlement
+    /// reverts if any order it was about to fill fails it. Reverting is the
+    /// safe direction and it is cheap: nothing has been distributed yet, the
+    /// residual unwinds with it, and the batch simply retries. On the piggyback
+    /// path `settleFromCallback` absorbs it; on the filler path it returns the
+    /// filler's delivery along with it.
+    ///
+    /// This is the primary defence for I8. `_dropIneligible` is now the
+    /// optimisation — it keeps ineligible orders out of the residual sizing —
+    /// and this is the guarantee.
+    function _assertLimitsHeld(
+        Cand[] memory c,
+        Pots memory p
+    ) private view {
+        // Nothing was filled: no order can have been filled through its limit.
+        if (p.filled0 == 0 && p.filled1 == 0) return;
+
+        // The realised uniform price, from tokens the hook demonstrably holds.
+        uint256 realised =
+            p.filled0 > 0 ? Clearing.impliedPriceX96(p.pot1, p.filled0) : Clearing.impliedPriceX96(p.filled1, p.pot0);
+
+        (uint256 effZeroForOne, uint256 effOneForZero) = _effectivePrices(realised);
+
+        for (uint256 i; i < c.length; ++i) {
+            if (!c[i].live || c[i].grossFilled == 0) continue;
+
+            uint256 limit = c[i].limitPriceX96;
+            uint256 slack = (limit * I8_TOLERANCE_PPM) / FEE_DENOMINATOR;
+
+            if (c[i].zeroForOne) {
+                // Floor: the realised effective price must be at least the limit.
+                if (effZeroForOne + slack < limit) revert KesselErrors.LimitPriceBreached();
+            } else {
+                // Ceiling: it must be at most the limit.
+                if (effOneForZero > limit + slack) revert KesselErrors.LimitPriceBreached();
+            }
+        }
+    }
+
     /// @dev Execute the residual, then distribute pots that are, by
     /// construction, exactly the tokens the hook holds.
+    ///
+    /// ## On the ordering
+    ///
+    /// There is deliberately no untrusted external call anywhere between the
+    /// start of this function and its last state write. On the curve path the
+    /// only counterparty is the PoolManager; on the filler path the delivery
+    /// arrived *before* `settleWithFill` was entered, so `_acceptFillerDelivery`
+    /// only measures and banks it. The filler is paid afterwards, by
+    /// `_settleEpochInner`, once every write here has landed.
+    ///
+    /// That is checks-effects-interactions in the order it is supposed to be
+    /// in, and it is why this path carries no write-after-untrusted-call
+    /// pattern for a static analyser to report. The first version of Shape B
+    /// did — it paid the filler up front and called back into it — and the
+    /// inversion was worth the loss of convenience: a filler can no longer
+    /// source its delivery from the very input it is being paid, and must
+    /// front the capital or flash-borrow it from somewhere outside Kessel.
+    ///
     function _executeAndDistribute(
         uint32 epoch,
         Cand[] memory c,
         Clearing.Solution memory sol,
         uint256 net0,
-        uint256 net1
+        uint256 net1,
+        address filler,
+        uint256 delivered
     ) private {
         _closeEpoch(epoch);
 
-        (int256 poolDelta0, int256 poolDelta1) = _executeResidual(sol);
+        (int256 poolDelta0, int256 poolDelta1) =
+            filler == address(0) ? _executeResidual(sol) : _acceptFillerDelivery(epoch, sol, filler, delivered);
 
         // ---- fill ratio, derived from what ACTUALLY executed ---------------
         // The closed form only picked a target. Whatever the pool really did,
@@ -743,6 +1445,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
         (p.pot1, fee1) = _potFor(p.filled1, poolDelta1, fee1);
 
         _assertUniformPrice(p.pot0, p.pot1, p.filled0, p.filled1);
+        _assertLimitsHeld(c, p);
 
         uint256 settledCount = _applyFills(epoch, c, p);
 
@@ -906,6 +1609,83 @@ contract KesselHook is BaseHook, IUnlockCallback {
         if (d1 > 0) currency1.take(poolManager, address(this), uint256(d1), true);
     }
 
+    /// @dev Shape B: pull the delivery the filler declared, and return the SAME
+    /// signed deltas the curve path returns so that everything downstream is
+    /// unchanged.
+    ///
+    /// **There is no call to the filler here.** `CurrencySettler.settle` with an
+    /// external payer is a `transferFrom` on the *token*, moving the delivery
+    /// straight from the filler to the singleton; the filler itself is never
+    /// handed control. It is paid at the very end of `_settleEpochInner`, after
+    /// every state write — which is why the settlement path contains no
+    /// write-after-untrusted-call ordering at all.
+    ///
+    ///  1. Refuse anything below the curve floor. That reverts the whole
+    ///     settlement before a single token moves, so a filler that offers
+    ///     short has spent gas to change nothing.
+    ///  2. Pull exactly `delivered` from the filler into the singleton and mint
+    ///     it as custody, so the pots are backed by tokens the hook
+    ///     demonstrably holds, exactly as on the curve path (I2).
+    ///
+    /// The floor is `sol.residualOut`: what `Clearing` predicted the curve would
+    /// pay for the same input. A filler therefore only ever wins by beating the
+    /// pool, and every wei above the floor lands in the trader pots and is
+    /// distributed at the batch's single uniform price (I4).
+    ///
+    /// A larger delivery produces a smaller fill ratio, so both sides of a
+    /// two-sided batch still move together and I4 holds without recomputation.
+    /// It does NOT leave the eligible set valid, which is a separate matter and
+    /// the reason `_assertLimitsHeld` exists: the realised price is `Y / X`, so
+    /// delivering above the floor raises it, improving the currency0 sellers'
+    /// execution and worsening the currency1 sellers' by the same amount. A
+    /// delivery generous enough to push the other side through its own ceiling
+    /// is refused there (SR-9).
+    ///
+    /// SR-9. `delivered` is a parameter rather than `outCurrency.balanceOfSelf()`.
+    /// The balance is unattributed — it is whatever anyone has ever sent this
+    /// contract — so reading it let a filler satisfy the floor out of tokens it
+    /// had not provided. Pulling a declared amount is exact by construction and
+    /// leaves no raw balance on the hook to be claimed by anyone.
+    function _acceptFillerDelivery(
+        uint32 epoch,
+        Clearing.Solution memory sol,
+        address filler,
+        uint256 delivered
+    ) private returns (int256 d0, int256 d1) {
+        // A perfectly matched batch never touches any counterparty, so there is
+        // nothing to pull and nothing to pay for. Deliberately not a revert:
+        // the settlement itself is valid and completes, and because nothing is
+        // pulled the filler loses nothing by having offered.
+        if (sol.residualIn == 0) return (0, 0);
+
+        Currency outCurrency = sol.zeroForOne ? currency1 : currency0;
+        uint256 floorOut = sol.residualOut;
+
+        if (delivered < floorOut) revert KesselErrors.FillerUnderDelivered();
+
+        // `payer = filler`, so this is a `transferFrom` into the singleton. The
+        // filler must have approved this contract for `delivered`.
+        outCurrency.settle(poolManager, filler, delivered, false);
+        poolManager.mint(address(this), outCurrency.toId(), delivered);
+
+        emit KesselEvents.SlowBatchFilledExternally(epoch, filler, sol.residualIn, floorOut, delivered);
+
+        // Same sign convention as `_executeResidual`: negative is what the hook
+        // paid away, positive is what it received. The negative leg is booked
+        // here even though the transfer happens later, because the accounting
+        // is what sizes the pots; the payment is settled against this delta at
+        // the end of `_settleEpochInner`.
+        //
+        // Reverting casts bounded to `int128`, matching what the curve path can
+        // produce: `_executeResidual` gets its deltas from a `BalanceDelta`,
+        // whose halves are int128 by construction.
+        int256 paid = int256(sol.residualIn.toInt128());
+        int256 got = int256(delivered.toInt128());
+
+        if (sol.zeroForOne) return (-paid, got);
+        return (got, -paid);
+    }
+
     function _recordEpoch(
         uint32 epoch,
         uint160 priceX96,
@@ -1057,26 +1837,58 @@ contract KesselHook is BaseHook, IUnlockCallback {
         }
     }
 
-    /// @notice Donate previously-deferred recapture to LPs. Permissionless:
-    /// this money is already owed to LPs and the hook must never keep it (I5).
+    /// @notice Donate previously-deferred recapture to LPs, and sweep any raw
+    /// token balance sitting on this contract to them as well. Permissionless:
+    /// all of this money is already owed to LPs and the hook must never keep it
+    /// (I5).
     ///
     /// @dev Safe to call when nothing is pending, and safe to call when
     /// liquidity is still out of range — `_recapture`'s fallback simply
     /// re-defers the amount rather than reverting.
+    ///
+    /// The raw-balance half exists because this contract is not supposed to
+    /// hold a raw balance at all: custody lives as ERC-6909 inside the
+    /// singleton, and SR-9 removed the one path that used to leave tokens here.
+    /// Anything that still arrives — a mistaken transfer, an order that named
+    /// the hook itself as its beneficiary — would otherwise sit forever with no
+    /// owner. Routing it to LPs gives it one, and gives anyone the means to
+    /// move it there.
     function sweepRecapture() external {
-        if (lpClaimable0 == 0 && lpClaimable1 == 0) return;
-        poolManager.unlock(abi.encode(UnlockAction.SWEEP, uint32(0), uint256(0)));
+        if (lpClaimable0 == 0 && lpClaimable1 == 0 && currency0.balanceOfSelf() == 0 && currency1.balanceOfSelf() == 0)
+        {
+            return;
+        }
+        poolManager.unlock(abi.encode(UnlockAction.SWEEP, uint32(0), uint256(0), uint256(0)));
     }
 
     /// @dev Inside the unlock. Zeroes the deferred balances *before* attempting
     /// the donation so that a re-deferral in the catch branch cannot
     /// double-count; `_recapture` adds them straight back if it still fails.
     function _sweep() private {
-        uint256 a0 = lpClaimable0;
-        uint256 a1 = lpClaimable1;
+        uint256 a0 = lpClaimable0 + _absorbStray(currency0);
+        uint256 a1 = lpClaimable1 + _absorbStray(currency1);
         lpClaimable0 = 0;
         lpClaimable1 = 0;
         _recapture(immutablePoolKeyStorage, a0, a1);
+    }
+
+    /// @dev Convert a raw token balance held by this contract into ERC-6909
+    /// custody, so it can be donated on the same footing as every other
+    /// recaptured fee.
+    ///
+    /// The conversion is not optional bookkeeping: `_recapture` pays the
+    /// donation by BURNING 6909 (`settle(..., burn: true)`). Adding a raw
+    /// balance straight into `lpClaimable*` without minting it first would make
+    /// that burn come out of the traders' escrow instead — turning a stray
+    /// donation into an insolvency. Minting first keeps custody and obligations
+    /// moving together (I2).
+    function _absorbStray(
+        Currency c
+    ) private returns (uint256 amount) {
+        amount = c.balanceOfSelf();
+        if (amount == 0) return 0;
+        c.settle(poolManager, address(this), amount, false);
+        poolManager.mint(address(this), c.toId(), amount);
     }
 
     // ==================================================================
@@ -1106,7 +1918,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
         bool expired = _isExpired(o);
         if (o.owedOut == 0 && !(expired && o.amountInRemaining > 0)) revert KesselErrors.NothingToRedeem();
 
-        poolManager.unlock(abi.encode(UnlockAction.REDEEM, uint32(0), orderId));
+        poolManager.unlock(abi.encode(UnlockAction.REDEEM, uint32(0), orderId, uint256(0)));
     }
 
     /// @dev Inside the unlock: move output (and any expired refund) out of the
@@ -1211,16 +2023,18 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// statement of how long a batch may be made to rest before forced
     /// settlement (I11): an order cannot be refunded for having rested too long
     /// until it has rested at least as long as the protocol may make it.
+    ///
+    /// SR-10: the block half is read from the order's own `expiryBlock` stamp,
+    /// not recomputed from the live `maxDelay`. Recomputing made expiry
+    /// non-monotone — governance raising `maxDelay` could turn an already
+    /// expired order back into an unexpired one, and `_rollUnfilled` has by
+    /// then dropped it from every epoch index, so it was neither fillable nor
+    /// redeemable until the raised floor elapsed. A stamp cannot move.
     function _isExpired(
         Order storage o
     ) private view returns (bool) {
         if (currentEpoch <= o.epochExpiry) return false;
-
-        uint64 openedAt = epochs[o.epochSubmitted].openedAtBlock;
-        if (openedAt == 0) return true; // no batch record: epoch budget governs
-
-        uint256 floorBlocks = maxDelay < EXPIRY_BLOCK_FLOOR_MAX ? maxDelay : EXPIRY_BLOCK_FLOOR_MAX;
-        return block.number >= openedAt + floorBlocks;
+        return block.number >= o.expiryBlock;
     }
 
     /// @dev I11's hard bound. Past this point a batch is moved out of the way
@@ -1269,37 +2083,27 @@ contract KesselHook is BaseHook, IUnlockCallback {
     // Internals
     // ==================================================================
 
-    function _poolPoint() private view returns (Clearing.PoolPoint memory) {
-        (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
-        (uint160 lower, uint160 upper) = _activeRangeBounds(tick);
-        return Clearing.PoolPoint({
-            sqrtPriceX96: sqrtPriceX96,
-            liquidity: poolManager.getLiquidity(poolId),
-            lowerSqrtPriceX96: lower,
-            upperSqrtPriceX96: upper
-        });
-    }
-
-    /// @dev Bounds of the range over which active liquidity is constant.
+    /// @dev Bounds of the range over which active liquidity is constant, as
+    /// ticks. The multi-range walk needs the tick itself rather than only its
+    /// price, because it has to read `liquidityNet` at the boundary it crosses.
     ///
     /// Liquidity changes only at *initialised* ticks, so this searches the tick
     /// bitmap rather than snapping to the next multiple of `tickSpacing`. The
     /// distinction is not cosmetic: most spacing multiples carry no position,
     /// and clamping to them would force nearly every batch into a partial fill.
     ///
-    /// The search covers one bitmap word in each direction, mirroring v4's own
-    /// `nextInitializedTickWithinOneWord`. When a word contains no initialised
-    /// tick, its boundary is returned — which is still a correct bound, since
-    /// no liquidity change can occur before it.
-    function _activeRangeBounds(
+    /// When a word contains no initialised tick, its boundary is returned —
+    /// which is still a correct bound, since no liquidity change can occur
+    /// before it.
+    function _activeRangeTicks(
         int24 tick
-    ) private view returns (uint160 lower, uint160 upper) {
+    ) private view returns (int24 lowerTick, int24 upperTick) {
         int24 spacing = tickSpacing;
         int24 compressed = tick / spacing;
         if (tick < 0 && tick % spacing != 0) compressed--;
 
-        lower = TickMath.getSqrtPriceAtTick(_scanDown(compressed, spacing));
-        upper = TickMath.getSqrtPriceAtTick(_scanUp(compressed, spacing));
+        lowerTick = _scanDown(compressed, spacing);
+        upperTick = _scanUp(compressed, spacing);
     }
 
     /// @dev Words of tick bitmap to scan in each direction before giving up and
@@ -1470,6 +2274,18 @@ contract KesselHook is BaseHook, IUnlockCallback {
         k = newK;
     }
 
+    /// @notice Set the size-denominated tax multiplier (DD-4 as amended).
+    /// @dev Settable even on a deployment fixed to the rate form, where it has
+    /// no effect. Refusing there would be a second failure mode to reason
+    /// about for no benefit, and the value is visible on-chain either way.
+    function setKGas(
+        uint256 newKGas
+    ) external onlyGovernance {
+        if (newKGas < K_GAS_MIN || newKGas > K_GAS_MAX) revert KesselErrors.ParameterOutOfBounds();
+        emit KesselEvents.ParameterUpdated("kGas", kGas, newKGas);
+        kGas = newKGas;
+    }
+
     function setCadence(
         uint32 newMinSettleAge,
         uint32 newMaxDelay,
@@ -1505,6 +2321,47 @@ contract KesselHook is BaseHook, IUnlockCallback {
         emit KesselEvents.ParameterUpdated("maxWarehouse1", maxWarehouse1, cap1);
         maxWarehouse0 = cap0;
         maxWarehouse1 = cap1;
+    }
+
+    /// @notice Set the per-direction minimum Slow-Lane order size (SR-12).
+    ///
+    /// @dev Deliberately unbounded, matching `setWarehouseCaps`. A ceiling
+    /// would have to be a constant in token units, and no such constant is
+    /// meaningful across decimal conventions — an 18-decimal bound is absurd on
+    /// a 6-decimal pool and vice versa.
+    ///
+    /// Nothing is conceded by leaving it open. A floor set absurdly high
+    /// refuses NEW orders and nothing else: every existing claim stays
+    /// redeemable and every expired one stays refundable, because the check
+    /// sits at intake, before custody is taken. That is the same capability
+    /// governance already holds through `maxWarehouse* = 0` and through
+    /// `setPaused`, both of which are documented and neither of which can
+    /// strand funds (PRD §11 case 12). Announced like every other parameter,
+    /// so it cannot be moved quietly.
+    function setMinOrderSize(
+        uint128 min0,
+        uint128 min1
+    ) external onlyGovernance {
+        emit KesselEvents.ParameterUpdated("minOrderSize0", minOrderSize0, min0);
+        emit KesselEvents.ParameterUpdated("minOrderSize1", minOrderSize1, min1);
+        minOrderSize0 = min0;
+        minOrderSize1 = min1;
+    }
+
+    /// @notice Set the DD-5 residual cap, as a fraction of the analytic
+    /// break-even in bps (10,000 = exactly break-even).
+    ///
+    /// @dev Bounded at both ends, and the ceiling is the point of the whole
+    /// mechanism: `RESIDUAL_CAP_BPS_MAX = 10_000` means no reachable governance
+    /// setting can place the cap where sandwiching the settlement residual
+    /// turns a profit. Governance can tune how much margin the protocol keeps
+    /// above that line; it cannot cross it, and it cannot switch the bound off.
+    function setResidualCapBps(
+        uint16 bps
+    ) external onlyGovernance {
+        if (bps < RESIDUAL_CAP_BPS_MIN || bps > RESIDUAL_CAP_BPS_MAX) revert KesselErrors.ParameterOutOfBounds();
+        emit KesselEvents.ParameterUpdated("residualCapBps", residualCapBps, bps);
+        residualCapBps = bps;
     }
 
     function setExpiryForfeitBps(
@@ -1545,6 +2402,49 @@ contract KesselHook is BaseHook, IUnlockCallback {
     // ==================================================================
     // Views for tests, keepers and the demo dashboard
     // ==================================================================
+
+    /// @notice What the next external fill would need to deliver, and what it
+    /// would be paid.
+    ///
+    /// @dev Fillers need this: the deliver-first model means the tokens have to
+    /// be transferred before `settleWithFill` is called, so the amount cannot
+    /// be discovered from inside a callback. Reading it and acting on it in the
+    /// same transaction is the intended pattern.
+    ///
+    /// Quoted off the same settlement-time pool state the settlement itself
+    /// will use, so a quote read and acted on in one transaction is exact. Read
+    /// in one block and used in another it is only an estimate — the pool moves
+    /// — and the settlement will refuse a short delivery rather than settle
+    /// badly. That asymmetry is deliberate: I6 forbids pinning a Slow-Lane
+    /// price to anything but settlement-time state, so this cannot be made into
+    /// a binding quote without breaking the anti-hedging property.
+    ///
+    /// @return ok False when there is nothing fillable right now.
+    /// @return outCurrency The currency the filler must deliver.
+    /// @return minDeliver The minimum delivery that will be accepted — what the
+    /// curve would pay for the same input.
+    /// @return inCurrency The currency the filler will be paid in.
+    /// @return payout How much of it the filler will receive.
+    function quoteFill()
+        external
+        view
+        returns (bool ok, Currency outCurrency, uint256 minDeliver, Currency inCurrency, uint256 payout)
+    {
+        if (paused || _settling) return (false, currency0, 0, currency1, 0);
+
+        uint32 epoch = oldestUnsettledEpoch;
+        if (!_piggybackDue(epoch)) return (false, currency0, 0, currency1, 0);
+
+        Cand[] memory c = _loadCandidates(epoch);
+        if (c.length == 0) return (false, currency0, 0, currency1, 0);
+
+        (Clearing.Solution memory sol,,, bool converged) = _solveEligibleSet(c);
+        if (!converged || !sol.feasible || sol.residualIn == 0) return (false, currency0, 0, currency1, 0);
+
+        outCurrency = sol.zeroForOne ? currency1 : currency0;
+        inCurrency = sol.zeroForOne ? currency0 : currency1;
+        return (true, outCurrency, sol.residualOut, inCurrency, sol.residualIn);
+    }
 
     function orderCount(
         uint32 epoch

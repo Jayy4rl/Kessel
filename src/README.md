@@ -26,6 +26,8 @@ src/
                         Owns DD-1 and the trader-identity half of DD-15
                         (reconnaissance finding A).
     FastLaneFee.sol     PURE. g(...) -> uint24, saturating and monotone.
+                        Two tax modes: the paper's size-denominated form and
+                        the original rate form (DD-4 as amended).
                         Owns DD-2, DD-4. Enforces I12.
 
   settle/
@@ -35,6 +37,71 @@ src/
                         enforced structurally rather than by review.
                         Owns DD-5, DD-11. Enforces I4, I6, I8.
 ```
+
+## Amendments after the security review (2026-08-29)
+
+Three changes were made under an explicit owner directive, after the reference
+survey in the session log. Each is recorded here because each moved
+protocol-visible behaviour, and two of them touched a DD that had been marked
+resolved. **None of them changes `getHookPermissions()`, so the frozen bitmap
+(DD-8) is untouched** -- but all three change creation bytecode, so any
+previously mined address is invalid.
+
+- **DD-4 amended -- size-denominated Fast-Lane tax.** The original resolution
+  read "convert wei to a rate" as requiring an oracle and settled on expressing
+  `k` as a rate, accepting that the absolute premium then scales with trade
+  size. That conflated an *external price feed* (forbidden by PRD §9) with the
+  *pool's own* `sqrtPriceX96`, which `beforeSwap` is already standing in front
+  of. `feeBySize` now implements the paper's form wherever one side of the pool
+  is the gas token; `fee` remains the fallback for pools that have no such side,
+  where denominating size genuinely would need an oracle. The mode is fixed at
+  construction (`gasTokenSide`) and cannot move under a live pool. I12 holds in
+  both modes and across the choice between them.
+
+- **DD-5 amended -- multi-range clearing.** `Clearing.solve` is exact only
+  inside one constant-liquidity range, so the solver used to stop at the first
+  initialised tick, partially fill, and roll. `KesselHook._solveMultiRange` now
+  walks up to `MAX_CLEARING_RANGES` ranges, crossing ticks the way v4's own swap
+  loop does and calling `solve` once per range so the closed form stays exact
+  everywhere it is used. The predicted price moved from `a * b` to the batch
+  totals, because `a * b` is the average of a move within one range and is
+  simply not the average across several. `MAX_CLEARING_RANGES` is a gas knob,
+  not a correctness one: exhausting it degrades to exactly the old behaviour.
+
+- **I7 amended -- external fill (Shape B).** `settleWithFill` lets an external
+  filler execute the residual instead of the curve, subject to a floor of what
+  the curve was predicted to pay. The flow is **deliver-first**: the filler
+  transfers the output currency to the hook and then calls, the hook measures
+  what arrived, and the filler is paid the batch's input only after every state
+  write has landed. There is no callback into the filler at any point, and
+  `quoteFill()` exists so the delivery can be sized without one. This is the one change that *weakens* a stated
+  invariant, and it should be read as such: I7 moves from structural ("no
+  capturing intermediary exists") to bounded ("no intermediary captures value
+  that would otherwise have reached traders or LPs, relative to the curve-only
+  settlement"). Every wei above the floor flows into the trader pots and is
+  distributed at the batch's single uniform price; the hook retains none of it.
+  Whether some share of the improvement *should* be routed to LPs instead is an
+  open policy question and was deliberately not decided here.
+
+Three things about Shape B are worth carrying forward. All three came from
+writing the adversarial tests, and the first two are corrections to designs that
+looked fine on the page:
+
+1. **Deliver-first, pay-last -- not pay-first with a callback.** The obvious
+   design lets the filler source its delivery from the very input it is being
+   paid, which is convenient and puts an untrusted call in the middle of a
+   half-finished settlement. Inverting it removes the window instead of guarding
+   it, and costs the filler only the need to front capital or flash-borrow from
+   outside Kessel. The pattern a static analyser reports disappears with it; see
+   finding 14 in `docs/SLITHER-TRIAGE.md` for the full disposition.
+2. **Delivery is measured by balance, never by `sync`/`settle`.** v4 keeps the
+   currently-synced currency in a single transient slot, so any counterparty
+   that touches the pool calls `sync` itself and silently redirects the hook's
+   own `settle()` to the wrong currency. The callback version had exactly this
+   bug, and a test caught it.
+3. **The filler path refuses native currency.** A native `take` hands control to
+   the recipient with a bare `call`, and the payout leg goes to a
+   caller-controlled address. SR-6 is the standing reminder of what that costs.
 
 ## Where the plan was wrong, and why
 
@@ -96,6 +163,15 @@ suite, and all three were permanent rather than recoverable:**
   unreachable limits would have frozen the entire Slow Lane *permanently*, with
   expiry no escape because expiry is measured in epochs and epochs stop
   advancing too. `test_unfillableBatchDoesNotBlockLaterBatches`.
+- **SR-8** — the eligibility screen priced a clamped batch with the fill ratio
+  dropped, so orders were filled through their own `minOut`. `_predictedPrice`
+  now takes the price from the residual (`Y / X`, exact at any fill ratio) and
+  `_assertLimitsHeld` re-checks every fill against the price the batch really
+  cleared at, unwinding rather than filling through a stated limit.
+- **SR-9** — the external fill measured `balanceOfSelf()` and returned silently
+  when the settlement was a no-op, so a caller could be paid out of tokens it
+  never provided and an honest filler's capital could be stranded for the next
+  caller to collect. `settleWithFill` now takes the amount and pulls it.
 - **SR-4** — the tick-bitmap cursor multiplied an `int24` by the tick spacing.
   One word-step past the initialised ticks on a wide-spaced pool overflows, and
   the checked multiplication panics *inside* settlement: every settlement for
@@ -125,6 +201,13 @@ specific evidence rather than as a feeling:
 - **Both entry paths.** `test_bothSettlementEntryPathsWork` and
   `test_nestedSwapDuringAfterSwapDoesNotCorruptTheTriggeringSwap` cover the
   §8.3 no-nested-`unlock` rule from both sides.
+- **The external-fill hand-off.** `test/security/ExternalFill.t.sol` covers a
+  filler that absconds with the input, under-delivers by one wei, reenters
+  settlement directly, runs a nested `poolManager.swap` inside the hook's own
+  unlock (SR-6's vector at a new entry point), or is itself a trader in the
+  batch. The claim being defended is that there are only two outcomes -- settle
+  at a price at least as good as the curve, or unwind completely -- and in
+  particular no outcome where custody ends up short.
 - **The closed attacks.** Every test in `test/security/` was written before its
   fix and observed to fail first. They are regression locks: if one starts
   passing for the wrong reason, or starts failing, an attack has reopened.
@@ -133,6 +216,15 @@ specific evidence rather than as a feeling:
   empty-range revert, priority-fee arithmetic, and (added 2026-08-26) that v4
   skips a hook's own callbacks when the hook is the caller, which is what keeps
   the settlement residual from being charged the Fast Lane's urgency tax.
+- **Reachability.** `forge coverage` (invariant suite included) reports 99.85%
+  of lines, 100% of functions and 89.16% of branches executed. The 22 unreached
+  branches are enumerated and argued one by one in `docs/COVERAGE-TRIAGE.md`;
+  every one is a guard against a state an upstream check already excludes, and
+  the claim "unreachable" is written down so that a change which makes one
+  reachable is caught here rather than in production. Reaching that number
+  removed three dead private helpers (`_poolPoint`, `_activeRangeBounds`,
+  `_selfBalance`) that no call site had referenced since the multi-range
+  amendment.
 - **Static analysis.** Slither 0.11.6 reports no high-severity findings; every
   medium was triaged, and the two that were real (the `_payoutOrder` reentrancy
   above, and `setGovernance` accepting `address(0)` on a contract where

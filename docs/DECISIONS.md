@@ -305,6 +305,299 @@ These are agent-made calls under the same owner directive as the DD resolutions 
   `test_governanceCannotBeHandedToTheZeroAddress`,
   `test_governanceHandoverIsAnnounced`.
 
+# Audit amendments (2026-09-01)
+
+An external security audit of the implemented hook found two confirmed
+vulnerabilities and two lower-severity defects, all four in the layer that
+decides *which* orders enter a batch and *who* provided the tokens a batch is
+filled with. None of them touched the solvency core: `Clearing.fillRatio` makes
+I2 and I4 hold whatever the price prediction says, and the 219-test suite —
+invariants included — was green through every one of them. That is the reason
+they are recorded here rather than folded into the DDs they amend: each narrows
+a resolution that was already written down, and each was invisible to the
+property that was supposed to cover it.
+
+Every amendment below has regression tests that were run against the *unfixed*
+contract first and observed to fail, in `test/security/ClampedBatchLimits.t.sol`,
+`test/security/FillerAttribution.t.sol` and
+`test/security/ExpiryAndCensorship.t.sol`.
+
+These are agent-made calls under the same owner directive as the DD resolutions
+above, and are subject to the same review and reversal. **SR-9 changes the
+`settleWithFill` ABI**, which is the only externally breaking change in the set.
+
+## SR-8 — The eligibility price must be the price the batch actually clears at (amends DD-5, DD-11)
+
+- **Defect (high, I8 broken, no attacker required).** `_dropIneligible` screens
+  each order's limit against `sol.priceX96`, a prediction made before the
+  residual executes; payouts come from the pots, so the realised price is
+  `pot1 / filled0`. `_predictedPrice` computed the prediction from the *totals*
+  identity — `P = (residualOut + N1) / N0` — which is the solvency relation **at
+  a fill ratio of one**. The general relation carries lambda:
+  `P = (Y + lambda*N1) / (lambda*N0)`. Whenever the multi-range walk could not
+  absorb the whole batch (four ranges exhausted, a zero-liquidity boundary, an
+  infeasible segment) the batch clamped, lambda collapsed, and the prediction
+  came out wrong by roughly `1/lambda` — **understated** for a zeroForOne
+  residual and **overstated** for a oneForZero one, i.e. wrong in the unsafe
+  direction for exactly the side whose limit was the binding one. Orders the
+  realised price did not satisfy were admitted and filled through their
+  `minOut`. In the reproduction a currency1 seller who demanded at least 2
+  currency0 per currency1 received 1.002 — **50.1% of his stated minimum** — on
+  a batch predicted at 0.130 that cleared at 0.997.
+- **How it got in.** This is a regression introduced by the multi-range
+  amendment to DD-5. The single-range predecessor, `Clearing.solve`'s
+  `s.priceX96 = a * b`, was *correct under clamping*, because `a * b` is
+  identically `Y / X`. `a * b` genuinely stops being the average price once the
+  walk crosses a tick, so it had to be replaced — but it was replaced with a
+  formula that only holds in the unclamped case.
+- **Why no test caught it.** `testFuzz_I8_filledOrdersNeverBreachTheirLimit`
+  submits a **single one-sided order** against the wide-range fixture. That
+  batch never clamps and has no counter-side, so lambda is 1 and the wrong
+  formula coincides with the right one. The stateful `invariant_I8_...` only
+  asserts that consumed input produced *some* output, not that it met the limit.
+- **Amendment (a).** `_predictedPrice` is taken from the residual itself:
+  `P = residualOut / residualIn` for a zeroForOne residual and
+  `residualIn / residualOut` for the other. This is exact for any number of
+  ranges **and any fill ratio**, and it falls straight out of
+  `Clearing.fillRatio`'s own algebra: equalising the two sides' implied prices
+  gives `P = Y / X`, with the batch totals cancelling entirely. The `net0 == 0`
+  special case disappears, because it was already computing exactly this.
+- **Amendment (b), the one that matters.** `_assertLimitsHeld` re-runs the
+  eligibility screen against the price the batch **really** cleared at, and
+  reverts the settlement if any order it was about to fill fails it. The screen
+  is now the optimisation — it keeps ineligible orders out of the residual
+  sizing — and this is the guarantee. Reverting is the safe direction and it is
+  cheap: nothing has been distributed, the residual unwinds with it, the
+  piggyback path absorbs it, and the batch retries.
+- **Tolerance.** `I8_TOLERANCE_PPM = 1` (0.0001%). The screen and the realised
+  price are computed from different quantities — the sized residual versus the
+  distributed pots — so they agree to within integer rounding rather than bit
+  for bit. One part per million is orders of magnitude above that rounding, far
+  below any economically meaningful breach, and a hundred times tighter than the
+  tolerance I4 already runs with.
+- **Liveness cost, acknowledged.** A settlement that reverts does not advance the
+  cursor, so a *persistent* breach would pin the batch until `absoluteMaxDelay`.
+  This is not a new class of exposure — `_assertUniformPrice` and `_applyFills`
+  already revert — and with amendment (a) in place the prediction and the
+  realisation agree to rounding on the curve path, so the assertion is expected
+  to fire only on the filler path it was also written for.
+
+## SR-9 — The external fill is attributed to its caller, and a no-op fill returns their capital (amends DD-7's Shape B)
+
+- **Defect (high, theft).** Two defects on `settleWithFill` that composed.
+  **(a)** The path was *deliver-first*: transfer the output currency in, then
+  call, and the hook took `outCurrency.balanceOfSelf()` to be the delivery. That
+  balance is unattributed — it is whatever anyone has ever sent this contract —
+  so a caller could satisfy the curve floor out of tokens it never provided and
+  still be paid the batch's entire input. Reproduced: a filler with **zero
+  capital** was paid 1.999 ETH of input.
+  **(b)** `_settleEpochInner` returns silently when the batch cannot settle
+  (every order screened out, an infeasible pool, an emptied candidate set), and
+  `settleWithFill` did not check. The caller's already-transferred delivery was
+  never banked, never refunded, and simply stayed on the contract.
+  Chained: front-run an honest filler with a swap that moves the price until
+  every order in the batch fails its limit; their transaction *succeeds and does
+  nothing*, stranding their capital; then call `settleWithFill` yourself,
+  delivering nothing, and collect it.
+- **Why no invariant fired.** Neither step touches ERC-6909 custody. I2
+  conserves custody against obligations; a raw token balance sitting on the hook
+  is outside both sides of that equation, and the test fixture's `_obligations()`
+  does not model it either.
+- **Amendment (a) — ABI change.** `settleWithFill()` becomes
+  `settleWithFill(uint256 delivered)`. The caller declares the amount and
+  approves this contract; `_acceptFillerDelivery` pulls exactly that much
+  straight from the filler into the singleton. Attribution is exact by
+  construction, and the tokens never rest on the hook at all. This does **not**
+  reintroduce the callback DD-7's Shape B write-up rejected: `transferFrom`
+  hands control to the *token*, not to the filler, and the filler is still paid
+  last, after every state write.
+- **Amendment (b).** `_settleEpochInner` returns whether it reached
+  distribution. On the filler path a `false` becomes a revert, which returns the
+  delivery with it. The curve paths keep the opposite convention deliberately: a
+  no-op there must not take the carrying Fast-Lane swap down.
+- **Amendment (c).** `sweepRecapture` now also sweeps any raw token balance on
+  the hook to LPs. With (a) and (b) the filler path leaves none, but a mistaken
+  transfer — or an order that named the hook itself as its beneficiary — still
+  arrives with no owner, and this gives it one and gives anyone the means to
+  move it there. The sweep **mints the raw balance into custody first**, which
+  is load-bearing rather than tidy: `_recapture` pays a donation by *burning*
+  ERC-6909, so crediting a raw balance to `lpClaimable*` without minting it
+  would take the donation out of the traders' escrow and turn a stray donation
+  into an insolvency.
+- **A third consequence, fixed by SR-8 rather than here.** Accepting any
+  delivery at or above the curve floor was described as unambiguously good —
+  "every wei above the floor lands in the trader pots". It lands there *at a
+  shifted price*: the realised price is `Y / X`, so over-delivering raises it,
+  improving the currency0 sellers' execution and worsening the currency1
+  sellers' by exactly the same amount. A filler could therefore improve one side
+  straight through the other side's stated ceiling. `_assertLimitsHeld` refuses
+  that. The identity check `_assertFillerNotInBatch` never could: `hookData`
+  lets anyone name any beneficiary, so a filler and the order it favours are
+  trivially different addresses.
+
+## SR-10 — Expiry is monotone (amends SR-3)
+
+- **Defect (low, temporary fund lock).** SR-3 added the block floor as
+  `min(maxDelay, EXPIRY_BLOCK_FLOOR_MAX)` blocks since the batch opened,
+  recomputed on every read from the **live** `maxDelay`. That made expiry
+  non-monotone: governance raising `maxDelay` (300 to 7,200 is inside the
+  parameter bounds) pushed the threshold out and turned already-expired orders
+  back into unexpired ones. Not a cosmetic status flip — `_rollUnfilled`
+  deliberately leaves expired orders behind and then deletes the epoch's index,
+  so an expired order is reachable only through `redeem`, and an order that is
+  no longer expired has no refund to claim and no index to be filled from. Its
+  input was locked until the raised floor elapsed, bounded by
+  `EXPIRY_BLOCK_FLOOR_MAX` at roughly a day.
+- **Amendment.** `Order` carries a `uint64 expiryBlock`, stamped once at intake
+  from the `maxDelay` in force then, and `_isExpired` reads the stamp. A stamp
+  can only ever bring the refund closer. It packs into the order's first storage
+  slot alongside `trader` and `zeroForOne`, so it costs no additional slot.
+- **Note.** This also closes half of the asymmetry flagged at the end of SR-3 —
+  the stamp is still anchored to `epochs[epochSubmitted].openedAtBlock` rather
+  than to the order's own submission block, so that **owner call** stands
+  unchanged.
+
+## SR-11 — A screened-out order cannot censor a filler (amends DD-7's Shape B)
+
+- **Defect (low, griefing).** `_assertFillerNotInBatch` walked every *loaded*
+  candidate. Since `hookData` lets a submitter name any beneficiary, one dust
+  order naming a competitor — with a limit price the market can never reach, so
+  it costs a wei and never fills — made every `settleWithFill` from that address
+  revert `InvalidFiller` for the life of the batch. Combined with DD-11's
+  rolling, the block travelled forward into every batch after it.
+- **Amendment.** The guard considers only candidates still `live` after the
+  eligibility screen. An order that was screened out is not part of the batch
+  being filled and has no self-dealing to guard against. The guard still holds
+  for an order that is actually being filled.
+
+## SR-12 — A minimum Slow-Lane order size (amends DD-6's work cap)
+
+- **Defect (low, throughput griefing).** `MAX_ORDERS_PER_EPOCH` bounds a
+  settlement's work by counting **orders**, not value, so the cheapest way to
+  consume it is with orders that carry no value at all. Thirty-two dust orders
+  whose limit price the market can never reach cost a wei each; the eligibility
+  screen drops them every settlement and `_rollUnfilled` pushes them to the
+  *head* of the next accepting batch, where they displace real orders into
+  later epochs for as long as their `expiryEpochs` allows (up to 256). The
+  repricing bill lands on whichever Fast-Lane trader carries the settlement.
+  The cursor still advances, so this is SR-1's acknowledged residual cost turned
+  deliberate rather than a freeze.
+- **Amendment.** `minOrderSize0` / `minOrderSize1`: a governance-set floor on a
+  single order, per direction, in that direction's own input-token units — the
+  same denomination as `maxWarehouse*`, and for the same reason (a common
+  numeraire would need the oracle PRD §9 forbids). Checked at intake, before any
+  custody is taken.
+- **Why this lever.** It prices the attack in the attacker's own locked capital,
+  which is the one cost that scales with how long they sustain it, and the
+  expiry forfeit taxes it again on the way out. The two obvious alternatives —
+  charging orders that are repeatedly dropped, or capping how many times an
+  order may roll — both reopen DD-9's free-option analysis and DD-11's rolling
+  policy, which `docs/OPEN-QUESTIONS.md` already flags as the two resolutions
+  most warranting a second look. That is a large bill for a throughput grief.
+  The floor also only makes explicit something the fill arithmetic already
+  imposes: `_computeFills` drops any order whose filled amount rounds to zero,
+  so a sufficiently small order was never fillable.
+- **Default is zero, i.e. off.** There is no unit-independent default worth
+  shipping: a floor meaningful on an 18-decimal pool is nonsense on a 6-decimal
+  one. This is a value the deployer must set with the pair in front of them, and
+  until they do, behaviour is exactly as before.
+- **Deliberately unbounded, matching `setWarehouseCaps`.** A ceiling would have
+  to be a constant in token units, and no such constant is meaningful across
+  decimal conventions. Nothing is conceded: a floor set absurdly high refuses
+  *new* orders and nothing else, because the check sits before custody is taken
+  — every existing claim stays redeemable and every expired one stays
+  refundable. That is the same capability governance already holds through
+  `maxWarehouse* = 0` and through `setPaused`, both documented, neither able to
+  strand funds (PRD §11 case 12).
+- **The floor applies at intake ONLY, and this is load-bearing.** A partial fill
+  can leave an order's remainder below the floor. Applying it to rolling or
+  filling would strand exactly the orders the hook has already taken custody of.
+  `test_SR12_raisingTheFloorNeverStrandsARestingOrder` pins it.
+- **Cost, stated.** It excludes small traders from the Slow Lane. On a pool
+  whose Slow-Lane value proposition is size-sensitive execution that is
+  acceptable; on a low-value-token pool the parameter needs care. It also raises
+  the attacker's cost for the residual grief flagged at the end of SR-3, which
+  runs on the same 64-dust-order primitive.
+
+## SR-13 — The settlement residual is capped (CLOSES DD-5 and DD-12)
+
+- **Defect (high, economic).** `docs/DD5-SIMULATION.md` measured, against the
+  real contracts, that sandwiching the settlement residual is profitable at
+  every governance-reachable `k` once the un-netted residual exceeds roughly
+  30-50 bps of pool depth — by 20x-370x the tax at the default. PRD DD-12
+  requires this resolved before mainnet; the register carried it as BLOCKING.
+- **The key observation, which the original report did not draw.** Its own
+  extraction model is `2*y*A*R/x^2` against an attacker cost of
+  `2*f_base*A*y/x`. **`A` cancels.** Profitability therefore does not depend on
+  the attacker's size, on `k`, or on trader slack — only on the residual:
+  `unprofitable <=> R <= f_base * x`. Analytic break-even 0.285 ether against a
+  measured 0.301 on a 95-ether pool: 5% agreement, no fitting.
+- **Amendment.** `Clearing.PoolPoint` gains `maxResidualIn`, and `solve` clamps
+  the target price so the residual cannot exceed it — expressed as a price bound
+  so `residualIn`, `residualOut`, `priceX96` and `clamped` all stay consistent,
+  exactly as the liquidity clamp already does. `KesselHook._residualCap` sizes
+  it as `f_base * virtual reserve * residualCapBps`, once per settlement against
+  the depth at spot, and the walk spends it down across ranges.
+- **`residualCapBps` is bounded at 10,000 = exactly break-even.** This is the
+  point of the mechanism: no reachable governance setting places the cap where
+  the attack pays. The default is 5,000 — half of break-even, a 2x margin
+  against the model's own error. The floor of 500 stops governance making a
+  batch take an unreasonable number of epochs.
+- **Why option 2 and not the report's recommended option 1.** §6 called a
+  begin-of-epoch price band "the only one that bounds the attack independently
+  of both trader behaviour and `k`". The cancellation shows the cap does too,
+  and costs less: a band anchored at epoch open would tell a trader submitting
+  into a fresh epoch that their fill lands within `±delta` of a price they can
+  see, which is a two-sided bound known at submission and precisely the hedging
+  surface I6 exists to close. A band's failure mode is also *refuse to settle*,
+  which fights I11; the cap's is *fill less this epoch*, which is DD-11's
+  existing partial-fill path.
+- **Result.** Re-running the same harness: **zero profitable rows across every
+  sweep**, at every residual size from 10 to 2,105 bps of depth, every slack
+  from 10 to 5,000 bps, and every `k` including zero. Previously +5,745 at 500
+  bps of slack; now -200.
+- **Cost, stated.** A batch larger than the cap clears over more epochs, and a
+  single settlement can move the clearing price by at most about
+  `f_base * residualCapBps` (~15 bps at the defaults). This partly supersedes
+  the gap-4 multi-range amendment: the walk still lets one settlement draw on
+  several ranges, but a batch large enough to cross ticks is by construction
+  larger than the cap, so "completes in one settlement" is no longer a property
+  the walk delivers. Netting is entirely unconstrained — extraction on the
+  coincidence-of-wants portion is exactly zero — so the mechanism's best case is
+  untouched.
+- **Test consequences, recorded because they look like regressions and are not.**
+  Three existing tests asserted behaviour the cap deliberately changes, and each
+  was rewritten to assert what it was actually for rather than relaxed:
+  `test_batchCrossingAnInitialisedTick...` now asserts progress-per-settlement
+  and eventual completion; the scaffold's residual-fee characterization now
+  measures against what the settlement actually filled; and the non-convergence
+  ladder was retuned onto a zero-liquidity pool, where the clearing price is the
+  pure coincidence-of-wants ratio and is therefore uncapped by construction.
+
+## Audit findings NOT acted on, and why
+
+One finding from the same audit is deliberately left open, and one item is
+recorded as a known property rather than a defect.
+
+- **Settlement timing is attacker-selectable (design risk).** **CLOSED by SR-13** — the residual cap bounds the extraction directly, so the exposure is no longer bounded only by trader limits. Original note retained: DD-12 argues that
+  running settlement in `afterSwap` stops the triggering trader improving their
+  *own* execution, which is true. It does not stop them choosing the pool price
+  at which the batch clears: displace the price, let `afterSwap` settle the
+  batch into it, restore. `minSettleAge` constrains the batch's age, not the
+  block or the price. The protection is each order's limit — which SR-8 has now
+  made real — but the framing "the Slow Lane is sandwich-proof" should be
+  narrowed to "sandwich-proof *within* a batch, and bounded across batches only
+  by the trader's limit price". Closing it further needs a settlement-time
+  sanity band, which is a protocol change touching DD-12 and PRD §7.6.
+- **A gas-limited Fast-Lane swap can suppress piggyback settlement (low).**
+  Under EIP-150's 63/64 rule a caller can size the transaction so the inner
+  `try this.settleFromCallback(epoch)` runs out of gas; the catch absorbs it,
+  `SettlementSkipped` fires, and the outer swap succeeds. A `gasleft()` floor
+  before the `try` would fix it by reverting the carrying swap, which DD-6 and
+  DD-8 explicitly forbid. `forceSettle` is the escape and I11 is unaffected, so
+  this is recorded as a known property — and SR-5's event is exactly the signal
+  that surfaces it.
+
 ## Reviewed and found sound (no change)
 
 - **Caller verification** — every hook callback is `onlyPoolManager` via `BaseHook`; `unlockCallback` checks the PoolManager directly; `settleFromCallback` rejects any caller but the contract itself.

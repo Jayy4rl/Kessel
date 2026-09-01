@@ -19,7 +19,15 @@ optimizer_runs = 800
 
 ffi = true
 gas_limit = "3000000000"
-fs_permissions = [{ access = "read-write", path = ".forge-snapshots/" }]
+fs_permissions = [
+    { access = "read-write", path = ".forge-snapshots/" },
+    # Read-only, scoped to one directory: the A3 fork test consumes a
+    # measurement produced by `script/a3_ordering.py`, which it cannot fetch
+    # itself (`vm.rpc` returns JSON ABI-encoded, so an `eth_getBlockByNumber`
+    # object is unparseable in Solidity). Read-only on purpose — the test must
+    # not be able to rewrite the evidence it asserts against.
+    { access = "read", path = "./test/fork/data" },
+]
 
 # v4-core's test helpers use `vm.expectRevert` on internal calls.
 allow_internal_expect_revert = true

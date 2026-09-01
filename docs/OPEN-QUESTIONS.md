@@ -102,6 +102,82 @@ ratified, and no open item has been retired.**
 
 ---
 
+---
+
+## Status — 2026-09-01 (DD-5 closed; A3 measured for the first time)
+
+### Closed
+
+- **DD-5 / DD-12 are closed by SR-13.** The residual cap. `docs/DD5-SIMULATION.md`
+  §8 has the derivation and the post-cap sweep: zero profitable rows at every
+  residual size, every `k` including zero, and every amount of trader slack.
+  The key step was noticing that the attacker's size `A` cancels out of the
+  report's own extraction and cost models, which makes the residual the only
+  quantity profitability depends on — and therefore the only one that has to be
+  bounded.
+
+### NEW AND BLOCKING — A3 does not hold the way the design assumes
+
+**A3 was measured against Base mainnet for the first time on 2026-09-01**
+(`script/a3_ordering.py`, artifact in `test/fork/data/a3-ordering.json`, asserted
+by `test_A3_baseOrdersAdjacentTransactionsByPriorityFee`). Three independent
+samples, ~300k-900k transaction pairs each. The result is not a clean yes or no:
+
+| pairs at index distance | ordered by priority fee |
+|---|---|
+| <= 1 (adjacent) | **96-97%** |
+| <= 4 | ~90% |
+| <= 8 | ~83% |
+| <= 16 | ~69% |
+| <= 128 | ~57% (random is 50%) |
+| all pairs | **60-66%** |
+
+**Base orders by priority fee locally and by arrival time globally.** That is the
+signature of sub-block building (Flashblocks, ~200ms): each sub-block is sorted
+by priority, and the ~2s block is a time-concatenation of them.
+
+What this supports, and it is the property the Fast-Lane tax actually needs: an
+actor trying to land *immediately ahead of a specific victim* must outbid it.
+97% is a strong result for that.
+
+**What it does not support, and PRD §7.5 currently claims:** that outbidding is
+the only route to the front. It is not. An actor that wins on **latency** —
+landing in an earlier flashblock — gets ahead of the victim without bidding
+anything, and therefore **pays no urgency tax at all**. The Fast Lane cannot tax
+what the chain does not price.
+
+Consequences the owner has to rule on:
+
+1. **§7.5's sandwich-resistance claim must be narrowed.** "Sandwich-resistant in
+   proportion to `k`" holds against a competitor bidding for position inside a
+   flashblock. It does not hold against a latency-advantaged searcher, who is
+   the actor most likely to be running the sandwich in the first place.
+2. **DD-4's `k` calibration target is undermined further.** "~90% of the
+   marginal searcher bid" presumes the marginal searcher expresses their bid as
+   a priority fee. On this chain a well-connected one need not, so the observed
+   priority-fee distribution understates willingness to pay by an unknown
+   amount. `k` was already known to be 3-30x mis-set; this makes the target
+   itself questionable, not just the value.
+3. **DD-2 (the chain choice) is reopened in substance if not in form.** It was
+   resolved on the premise that the target chain orders by priority fee. It
+   does, over a 200ms window. Whether that is enough is the question DD-2
+   actually needed answered, and it could not have been answered before this
+   measurement existed.
+
+**This is not a defect in the contract and no code change is proposed for it.**
+It is a measurement showing that an assumption the mechanism rests on holds more
+narrowly than the documents assume. **Owner decision required before mainnet.**
+
+### Fixed while running the measurement
+
+`test/fork/A3PriorityOrdering.t.sol` could never have passed against any live
+endpoint. `_headBlockNumber` did `abi.decode(raw, (uint256))` on a `vm.rpc`
+result, which is the minimal big-endian byte string (four bytes at current Base
+heights), not a padded word; and the block fetch treated the ABI-encoded return
+as a JSON string. The file's offline self-checks passed throughout, which is
+exactly why the 2026-08-26 note read "the first real run measures A3 rather than
+debugging the file". It did both.
+
 ## A note on "recommendations" in the PRD
 
 Many `[OPEN]` items in the PRD are followed by a sentence like "recommend (a) for v1" or "(a) is the simplest defensible choice." These are the PRD author's opinion on which alternative is easiest to ship, not a decision — the PRD is explicit elsewhere that `[OPEN]` items are never protocol requirements. The risk this document exists partly to guard against: an implementer (human or agent) reads a strong, confident recommendation next to an `[OPEN]` tag and quietly treats it as settled. Every question below states the PRD's recommendation where one exists, but flags it as **non-binding** — someone with actual authority over this project has to make the call.

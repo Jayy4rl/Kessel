@@ -138,6 +138,25 @@ contract GovernanceTest is KesselTestBase {
         assertEq(hook.expiryForfeitBps(), 100);
     }
 
+    /// @notice `kGas`, the size-denominated tax multiplier, is bounded like
+    /// every other parameter.
+    ///
+    /// @dev Settable on every deployment, but it only *bites* on one that
+    /// declared a gas-token side (DD-4 as amended) — see
+    /// `GasTokenFeeTest.test_setKGasMovesTheChargedFee` for its effect. The
+    /// ceiling is where one gwei of priority would cost 0.01 ETH of tax, which
+    /// is far above any plausible calibration; the point of the bound is that
+    /// an immutable contract cannot get a new one later.
+    function test_kGasBoundBinds() public {
+        vm.startPrank(governance);
+        vm.expectRevert(KesselErrors.ParameterOutOfBounds.selector);
+        hook.setKGas(10_000_001);
+        hook.setKGas(10_000_000); // the ceiling itself is allowed
+        hook.setKGas(0); // and zero disables the tax without disabling the lane
+        vm.stopPrank();
+        assertEq(hook.kGas(), 0);
+    }
+
     // ---- cadence coherence -------------------------------------------
 
     /// @notice The three cadence bounds have to stay ordered, or the gates stop
@@ -159,6 +178,39 @@ contract GovernanceTest is KesselTestBase {
         assertEq(hook.absoluteMaxDelay(), 2);
     }
 
+    /// @notice The cadence gates have absolute bounds as well as relative ones.
+    ///
+    /// @dev The ordering test above only pins them against each other, which a
+    /// coherent-but-useless setting would pass: `minSettleAge = 1,
+    /// maxDelay = 1` is ordered and would make forced settlement immediate,
+    /// while a `maxDelay` in the millions is ordered and would put I11's bound
+    /// out of reach. Both ends are checked here.
+    function test_cadenceAbsoluteBoundsBind() public {
+        vm.startPrank(governance);
+
+        // maxDelay below its floor, and above its ceiling.
+        vm.expectRevert(KesselErrors.ParameterOutOfBounds.selector);
+        hook.setCadence(1, 1, 3000, 2);
+        vm.expectRevert(KesselErrors.ParameterOutOfBounds.selector);
+        hook.setCadence(2, 100_001, 100_001, 2);
+
+        // minSettleAge above its ceiling.
+        vm.expectRevert(KesselErrors.ParameterOutOfBounds.selector);
+        hook.setCadence(301, 400, 3000, 2);
+
+        // absoluteMaxDelay above the shared ceiling.
+        vm.expectRevert(KesselErrors.ParameterOutOfBounds.selector);
+        hook.setCadence(2, 300, 100_001, 2);
+
+        // Both extremes of the admissible range are accepted.
+        hook.setCadence(1, 2, 2, 1);
+        hook.setCadence(300, 100_000, 100_000, 1);
+        vm.stopPrank();
+
+        assertEq(hook.maxDelay(), 100_000);
+        assertEq(hook.absoluteMaxDelay(), 100_000);
+    }
+
     // ---- warehouse cap (I9) ------------------------------------------
 
     function test_warehouseCapBlocksNewOrdersAtTheBoundary() public {
@@ -171,6 +223,29 @@ contract GovernanceTest is KesselTestBase {
 
         // The other direction is unaffected — the cap is per currency.
         _slowOrder(bob, false, 1e16, 1e15, 8);
+    }
+
+    /// @notice The currency1 cap binds on its own, in its own units.
+    ///
+    /// @dev I9 is denominated per currency in that currency's own units, so the
+    /// two caps are independent budgets rather than two views of one. The test
+    /// above pins that currency1 flow is not blocked by the currency0 cap;
+    /// this pins the half that actually protects anyone — that the currency1
+    /// budget is enforced at all. A cap that is only ever checked on one side
+    /// is not a cap.
+    function test_theCurrency1WarehouseCapBindsIndependently() public {
+        vm.prank(governance);
+        hook.setWarehouseCaps(type(uint128).max, 1e16);
+
+        _slowOrder(alice, false, 1e16, 1e15, 8); // exactly at the cap: allowed
+        assertEq(hook.warehoused1(), 1e16, "the currency1 budget was not booked");
+
+        vm.expectRevert();
+        _swapWithData(false, -1, LaneCodec.encodeSlow(alice, 1, 8)); // one wei over: refused
+
+        // currency0 has its own, untouched budget.
+        _slowOrder(bob, true, 1e18, 1e15, 8);
+        assertEq(hook.warehoused0(), 1e18, "the currency0 budget was wrongly constrained");
     }
 
     // ---- pause (PRD §11 case 12) -------------------------------------

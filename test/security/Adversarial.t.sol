@@ -235,6 +235,34 @@ contract AdversarialTest is KesselTestBase {
         hook.forceSettle();
     }
 
+    /// @notice SR-4's mirror image: the *upward* scan must survive the same
+    /// wide-spaced pool.
+    ///
+    /// @dev `_activeRangeTicks` runs both scans on every settlement, whatever
+    /// direction the batch is going, so a cursor overflow in `_scanUp` bricks
+    /// the pool exactly as one in `_scanDown` would. The two scans have
+    /// separate cursor arithmetic and separate clamps, and the original defect
+    /// was only ever observed downward — a fix that had been applied to one
+    /// side and not the other would look identical from the outside and would
+    /// pass `test_settlementSurvivesLargeTickSpacing`.
+    ///
+    /// Liquidity sits entirely BELOW the current tick here, so the upward scan
+    /// finds no initialised tick and walks whole empty bitmap words until its
+    /// cursor leaves the tick range.
+    function test_settlementSurvivesLargeTickSpacingUpward() public {
+        _deployKesselWithSpacing(32767);
+        _addLiquidity(-98301, -32767, 100 ether);
+        _fundAndApprove(address(this), 1_000 ether);
+
+        _slowOrder(alice, true, 1e15, uint128(5e14), 200);
+        _slowOrder(bob, false, 1e15, uint128(5e14), 200);
+
+        vm.roll(block.number + 4000);
+        hook.forceSettle();
+
+        assertGt(hook.oldestUnsettledEpoch(), 1, "the batch did not settle on a wide-spaced pool");
+    }
+
     // ==================================================================
     // PRD §15 scenario 5 — settlement-price manipulation
     // ==================================================================
@@ -351,7 +379,9 @@ contract AdversarialTest is KesselTestBase {
 
         address target = address(uint160(KESSEL_FLAGS) | (uint160(0x5555) << 144));
         deployCodeTo(
-            "KesselHook.sol:KesselHook", abi.encode(manager, currency0, currency1, spacing, governance), target
+            "KesselHook.sol:KesselHook",
+            abi.encode(manager, currency0, currency1, spacing, governance, uint8(0)),
+            target
         );
         hook = KesselHook(target);
 

@@ -1,7 +1,15 @@
 # DD-5 adversarial economic simulation — findings
 
-**Status: BLOCKING. Not ratified. Owner decision required.**
-**Date: 2026-08-26. Harness: `test/economic/DD5Manipulation.t.sol`.**
+**Status: CLOSED 2026-09-01 by the residual cap (SR-13). Superseded below.**
+**Original status: BLOCKING. Date: 2026-08-26. Harness: `test/economic/DD5Manipulation.t.sol`.**
+
+> **2026-09-01 — closure.** Option 2 of §6 was implemented, with the cap derived
+> analytically rather than tuned. Re-running this same harness against the
+> capped contract turns **every** row of **every** sweep negative: there is no
+> longer a residual size, a `k`, an attacker size, or an amount of trader slack
+> at which sandwiching the settlement residual pays. The tables below are the
+> PRE-cap measurements and are kept as the record of what the defect was. See
+> §8 for the post-cap numbers and `SR-13` in `DECISIONS.md` for the derivation.
 
 This document reports the result of the DD-5 manipulation simulation. It does
 **not** ratify DD-5 and it does not change any code. It exists because the
@@ -245,3 +253,98 @@ forge test --match-path 'test/economic/DD5Manipulation*' -vv
 Each test is independent and prints its own table. `test_DD5_sweep_*` is split
 by `k` because a single test deploying ~250 fresh pools exhausts the EVM memory
 limit.
+
+
+---
+
+## 8. Closure (2026-09-01) — the residual cap
+
+### The derivation, which makes the cap analytic rather than tuned
+
+This report's own extraction model is
+
+    extraction  =  2 * y * A * R / x^2        (currency1)
+
+against an attacker cost, established in §4 as the binding one, of `f_base` on
+each of two legs:
+
+    cost        =  2 * f_base * A * y / x .
+
+**`A` appears linearly on both sides and cancels.** That is the whole result.
+Whether the attack pays is not a question about the attacker's size, about `k`,
+or about how much slack traders leave — all three drop out. It is decided by the
+residual alone:
+
+    unprofitable   <=>   R  <=  f_base * x
+
+where `x` is the pool's virtual reserve of the residual's input currency.
+
+Checked against §2's own sweep with no fitting: the analytic break-even is
+`0.003 x 95 = 0.285` ether and the measured crossover is `0.301` ether — 5%
+agreement. §2's "roughly 30-50 bps of pool depth" is this line.
+
+`KesselHook._residualCap` implements `R_max = f_base * x * residualCapBps`, with
+`residualCapBps` defaulting to 5,000 (half of break-even, a 2x margin against
+the model's own error) and hard-capped at `RESIDUAL_CAP_BPS_MAX = 10_000`. No
+reachable governance setting can place the cap above break-even.
+
+### Correcting §6's recommendation
+
+§6 says option 1 (a begin-of-epoch price band) is "the only one that bounds the
+attack independently of both trader behaviour and `k`". The cancellation above
+shows option 2 does too, and it costs materially less:
+
+- A band anchored at epoch open would tell a trader submitting into a fresh
+  epoch that their fill lands within `±delta` of a price they can see. That is a
+  two-sided bound known at submission — precisely the hedging surface I6 exists
+  to close. The cap carries no submission-time information: it is a function of
+  settlement-time liquidity and price only.
+- A band's failure mode is *refuse to settle*, which fights I11. The cap's is
+  *fill less of the batch this epoch* — the partial-fill path DD-11 already
+  specifies, SR-1 already made safe, and the tick clamp already exercises.
+
+### Post-cap measurements
+
+Same harness, same pool, same sweeps.
+
+| sweep | pre-cap | post-cap |
+|---|---|---|
+| crossover in residual size (10 -> 2,105 bps of depth) | profitable above ~30-50 bps | **net P&L negative at every size**: -125, -200, -500, -1001, -2000, -4990, -20281 |
+| vs trader slack, batch 0.5e18 | +149 at 100 bps, +5,745 at 500 bps | **-200 at every slack**, 10 bps through 5,000 bps |
+| extraction as bps of batch, slack 30-1000 bps | rises with slack | **-40 at every slack**; extraction pinned at 1 bp of batch |
+| `k = 0` (no tax at all) | profitable | **negative at every row** |
+
+Profitable rows across the whole sweep, at every `k` including `k = 0`: **zero**.
+
+### A correction to this report's own verdict column
+
+§2's tables labelled a row PROFITABLE on `extraction > tax`. That isolated the
+priority-fee tax, which was the right lens while the question was whether the
+tax could be made to bind — §3 shows it cannot. Now that the closure is
+`f_base`-based, that label reports "PROFITABLE" for rows where the attacker
+loses money. The harness now reports net P&L, matching §4's own framing.
+
+### What is now claimable
+
+Added to §5's supported list:
+
+- The residual sandwich is unprofitable at **every** attacker size, every `k`
+  including zero, and every amount of trader limit slack, because the cap
+  bounds the one quantity the attacker's profitability actually depends on.
+- I8 remains a real defence but is no longer the *only* one. §4's "the bound
+  that does bind is trader limit slack" is superseded: the bound that binds is
+  now the cap, which does not depend on trader behaviour.
+
+Still not claimable, unchanged:
+
+- That the priority-fee tax makes it unprofitable. It does not, at any `k`. The
+  cap does.
+
+### Cost
+
+A batch larger than the cap clears over more epochs. At the defaults a single
+settlement moves the clearing price by at most about
+`f_base * residualCapBps` ~ 15 bps, and consumes at most 0.15% of one side's
+virtual reserves. Netting is unconstrained: extraction on the
+coincidence-of-wants portion is exactly zero (measured, `resBps=0` rows), so the
+cap never touches the mechanism's own best case.
