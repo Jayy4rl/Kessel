@@ -54,7 +54,7 @@ contract AdversarialTest is KesselTestBase {
 
         // Give every batch every chance to settle.
         for (uint256 round; round < 6; ++round) {
-            vm.roll(block.number + 10);
+            vm.roll(vm.getBlockNumber() + 10);
             _setPriorityFee(1 gwei);
             _fastSwap(true, -1e15);
         }
@@ -73,7 +73,7 @@ contract AdversarialTest is KesselTestBase {
         }
 
         for (uint256 round; round < 6; ++round) {
-            vm.roll(block.number + 10);
+            vm.roll(vm.getBlockNumber() + 10);
             _setPriorityFee(1 gwei);
             _fastSwap(true, -1e15);
         }
@@ -91,11 +91,11 @@ contract AdversarialTest is KesselTestBase {
         }
         uint256 honest = _slowOrder(bob, true, 1e15, uint128(5e14), 200);
 
-        vm.roll(block.number + 4000); // past absoluteMaxDelay
+        vm.roll(vm.getBlockNumber() + 4000); // past absoluteMaxDelay
         hook.forceSettle();
         assertGt(hook.oldestUnsettledEpoch(), 1, "dead batch still pinning the cursor");
 
-        vm.roll(block.number + 4000);
+        vm.roll(vm.getBlockNumber() + 4000);
         hook.forceSettle();
         assertGt(_order(honest).owedOut, 0, "honest order never reached");
     }
@@ -174,7 +174,7 @@ contract AdversarialTest is KesselTestBase {
         // Settle inside the extension window: the epoch budget is spent, but
         // the SR-3 block floor (min(maxDelay, EXPIRY_BLOCK_FLOOR_MAX)) has not
         // elapsed, so the order is still fillable rather than refundable.
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         assertLt(block.number, openedAt + hook.maxDelay(), "setup: the block floor already lapsed");
 
         _setPriorityFee(1 gwei);
@@ -203,7 +203,7 @@ contract AdversarialTest is KesselTestBase {
                 _slowOrder(alice, false, 1e13, uint128(1e17), 256);
             }
         }
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
 
         // Past the stated deadline, inside the floor: no refund, no cancel.
         vm.expectRevert();
@@ -229,7 +229,7 @@ contract AdversarialTest is KesselTestBase {
         _slowOrder(alice, true, 1e15, uint128(5e14), 200);
         _slowOrder(bob, false, 1e15, uint128(5e14), 200);
 
-        vm.roll(block.number + 4000);
+        vm.roll(vm.getBlockNumber() + 4000);
         // The forced path has no try/catch around it, so an arithmetic fault in
         // the scan surfaces here instead of being silently swallowed.
         hook.forceSettle();
@@ -257,7 +257,7 @@ contract AdversarialTest is KesselTestBase {
         _slowOrder(alice, true, 1e15, uint128(5e14), 200);
         _slowOrder(bob, false, 1e15, uint128(5e14), 200);
 
-        vm.roll(block.number + 4000);
+        vm.roll(vm.getBlockNumber() + 4000);
         hook.forceSettle();
 
         assertGt(hook.oldestUnsettledEpoch(), 1, "the batch did not settle on a wide-spaced pool");
@@ -280,7 +280,7 @@ contract AdversarialTest is KesselTestBase {
         uint256 amountIn = 1e16;
         uint256 id = _slowOrder(alice, true, amountIn, uint128(amountIn * 99 / 100), 200);
 
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         // The attacker slams currency0 into the pool, crushing the price, and
@@ -307,7 +307,7 @@ contract AdversarialTest is KesselTestBase {
         _slowOrder(alice, true, 1e16, uint128(1e15), 200); // permissive limit
         _slowOrder(bob, false, 1e16, uint128(1e15), 200);
 
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         uint256 in0 = _bal(currency0, address(this));
@@ -333,7 +333,7 @@ contract AdversarialTest is KesselTestBase {
     function test_carryingASettlementDoesNotImproveTheCarriersFill() public {
         _slowOrder(alice, true, 1e16, uint128(1e15), 200);
         _slowOrder(bob, false, 1e16, uint128(1e15), 200);
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         // Same swap, twice, from the same state: once where it carries the
@@ -357,7 +357,7 @@ contract AdversarialTest is KesselTestBase {
     /// cannot select the moment their own order clears (DD-12).
     function test_slowSubmissionNeverTriggersSettlement() public {
         _slowOrder(alice, true, 1e16, uint128(1e15), 200);
-        vm.roll(block.number + 100);
+        vm.roll(vm.getBlockNumber() + 100);
 
         uint32 cursorBefore = hook.oldestUnsettledEpoch();
         _slowOrder(bob, false, 1e16, uint128(1e15), 200);

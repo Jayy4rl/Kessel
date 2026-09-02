@@ -71,7 +71,7 @@ contract ClampedBatchLimitsTest is KesselTestBase {
         uint128 bobMinOut = 2 ether;
         uint256 bobId = _slowOrder(bob, false, bobIn, bobMinOut, 200);
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         hook.forceSettle();
 
         uint256 bobGross = bobIn - _order(bobId).amountInRemaining;
@@ -93,7 +93,7 @@ contract ClampedBatchLimitsTest is KesselTestBase {
         uint256 aliceId = _slowOrder(alice, true, 10 ether, 1e15, 200);
         _slowOrder(bob, false, 1 ether, 2 ether, 200);
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         hook.forceSettle();
 
         assertGt(_order(aliceId).owedOut, 0, "the eligible side was not filled");
@@ -115,7 +115,7 @@ contract ClampedBatchLimitsTest is KesselTestBase {
         _slowOrder(alice, true, aliceIn, 1e12, 200);
         uint256 bobId = _slowOrder(bob, false, bobIn, uint128(bobMinOut), 200);
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         try hook.forceSettle() {}
         catch { // an unwound settlement is a pass
             return;
@@ -159,7 +159,7 @@ contract ClampedBatchLimitsTest is KesselTestBase {
         _slowOrder(alice, true, 1e17, 1e12, 200);
         uint256 bobId = _slowOrder(bob, false, bobIn, bobMinOut, 200);
 
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         (bool ok, Currency outCurrency, uint256 floorOut,,) = hook.quoteFill();
         assertTrue(ok && floorOut > 0, "setup: the batch should be fillable");
@@ -192,7 +192,7 @@ contract ClampedBatchLimitsTest is KesselTestBase {
         uint256 id = _slowOrder(alice, true, 1e17, 1e12, 200);
         _slowOrder(bob, false, 1e16, 9.52e15, 200);
 
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         (bool ok, Currency outCurrency, uint256 floorOut,,) = hook.quoteFill();
         assertTrue(ok && floorOut > 0, "setup: the batch should be fillable");

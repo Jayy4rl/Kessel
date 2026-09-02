@@ -115,19 +115,18 @@ contract A3PriorityOrderingForkTest is Test {
         // would mean this chain does not have the fee market A3 assumes.
         assertGt(realBaseFee, 0, "A3: forked chain reports a zero base fee");
 
+        // Read through an external probe, never inline. See `PriorityProbe`.
+        PriorityProbe probe = new PriorityProbe();
+
         uint256[4] memory priorities = [uint256(0), 1 wei, 0.001 gwei, 1 gwei];
         for (uint256 i; i < priorities.length; ++i) {
             vm.txGasPrice(realBaseFee + priorities[i]);
-            assertEq(
-                FastLaneFee.priorityFeePerGas(),
-                priorities[i],
-                "A3: the hook's urgency signal is not tx.gasprice - block.basefee"
-            );
+            assertEq(probe.read(), priorities[i], "A3: the hook's urgency signal is not tx.gasprice - block.basefee");
         }
 
         // Below the base fee the reading is "no urgency revealed", not a wrap.
         vm.txGasPrice(realBaseFee / 2);
-        assertEq(FastLaneFee.priorityFeePerGas(), 0, "A3: sub-basefee gas price must read as zero urgency");
+        assertEq(probe.read(), 0, "A3: sub-basefee gas price must read as zero urgency");
     }
 
     /// @notice The fee the pool actually charges must move with the real
@@ -437,6 +436,24 @@ contract A3Fixture is KesselTestBase {
             }
         }
         revert("no FastSwap event");
+    }
+}
+
+/// @notice Reads the urgency signal in its OWN call frame.
+///
+/// @dev `FastLaneFee.priorityFeePerGas()` is `internal`, so calling it straight
+/// from a test inlines the `tx.gasprice` and `block.basefee` reads into the
+/// test's frame — where an optimising compiler may legally cache them across
+/// the `vm.txGasPrice` cheatcode that mutates them, since neither can change
+/// within a real transaction. Under `via_ir` it does exactly that, and the loop
+/// above then measures the *previous* iteration's gas price: the 1-wei case
+/// read as 0 and the test failed against correct contract behaviour.
+///
+/// An external call forces a fresh read. This is the same hazard that made
+/// `vm.roll(block.number + N)` a no-op elsewhere in the suite.
+contract PriorityProbe {
+    function read() external view returns (uint256) {
+        return FastLaneFee.priorityFeePerGas();
     }
 }
 

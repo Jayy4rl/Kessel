@@ -156,7 +156,7 @@ contract MinOrderSizeTest is KesselTestBase {
         vm.prank(governance);
         hook.setMinOrderSize(1e18, 1e18); // a thousand times either order
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         hook.forceSettle();
 
         assertGt(_order(aliceId).owedOut, 0, "a resting order was stranded by a floor raised after intake");

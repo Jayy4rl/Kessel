@@ -62,7 +62,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         assertEq(hook.oldestUnsettledEpoch(), 1, "setup: the cursor should still be on epoch 1");
 
         // The block-age half of the expiry test, and the forced-settlement gate.
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         assertGt(hook.currentEpoch(), _order(1).epochExpiry, "setup: epoch 1 should be past its budget");
 
         // The batch is "due" by the clock and has thirty-two order ids in its
@@ -93,7 +93,7 @@ contract SettlementLifecycleTest is KesselTestBase {
             _slowOrder(bob, true, 1e14, 1e13, 200);
         }
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         hook.forceSettle();
 
         uint256 before = IERC20Like(Currency.unwrap(currency0)).balanceOf(alice);
@@ -117,7 +117,7 @@ contract SettlementLifecycleTest is KesselTestBase {
             _slowOrder(bob, true, 1e14, 1e13, 200);
         }
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         assertEq(hook.oldestUnsettledEpoch(), 1, "setup: the cursor should be on epoch 1");
 
         // One live order is enough to make the batch a real settlement rather
@@ -150,7 +150,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         // any partial fill rounds to nothing.
         uint256 dust = _slowOrder(bob, false, 1, 1, 200);
 
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
         _fastSwap(true, -1e12);
 
@@ -273,7 +273,7 @@ contract SettlementLifecycleTest is KesselTestBase {
 
         // Forced rather than piggybacked: a carrying Fast-Lane swap would move
         // the price itself and dissolve the ladder.
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         hook.forceSettle();
 
         assertEq(hook.oldestUnsettledEpoch(), 1, "a non-converging batch must not be treated as settled");
@@ -293,7 +293,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         // pin `oldestUnsettledEpoch` and take the whole Slow Lane with it, so
         // I11's `absoluteMaxDelay` escape has to reach the non-converged branch
         // and not only the infeasible-pool one.
-        vm.roll(block.number + hook.absoluteMaxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.absoluteMaxDelay() + 1);
         hook.forceSettle();
         assertGt(hook.oldestUnsettledEpoch(), 1, "a non-converging batch pinned the settlement cursor");
     }
@@ -322,13 +322,13 @@ contract SettlementLifecycleTest is KesselTestBase {
 
         // Past the forced gate but well inside the absolute one: the batch is
         // retried and correctly stays put.
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         hook.forceSettle();
         assertEq(hook.oldestUnsettledEpoch(), 1, "an unsolvable batch should be retried, not discarded");
 
         // Past the absolute bound, it steps aside whether or not it could be
         // priced.
-        vm.roll(block.number + hook.absoluteMaxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.absoluteMaxDelay() + 1);
         hook.forceSettle();
         assertGt(hook.oldestUnsettledEpoch(), 1, "I11: an unsolvable batch pinned the cursor past its hard bound");
     }
@@ -351,7 +351,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         _slowOrder(alice, true, 1e16, 1e15, 200);
         _slowOrder(bob, false, 1e16, 1e15, 200);
 
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         vm.mockCallRevert(
@@ -373,7 +373,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         vm.clearMockedCalls();
         assertEq(hook.oldestUnsettledEpoch(), 1, "a skipped settlement advanced the cursor anyway");
 
-        vm.roll(block.number + 1);
+        vm.roll(vm.getBlockNumber() + 1);
         _setPriorityFee(1 gwei);
         _fastSwap(true, -1e15);
         assertGt(hook.oldestUnsettledEpoch(), 1, "the batch did not settle once settlement worked again");
@@ -401,7 +401,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         assertFalse(ok, "quoted a fill before the batch was due");
 
         // Due, but paused.
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         vm.prank(governance);
         hook.setPaused(true);
         (ok,,,,) = hook.quoteFill();
@@ -418,7 +418,7 @@ contract SettlementLifecycleTest is KesselTestBase {
     function test_quoteFillRefusesAPerfectlyMatchedBatch() public {
         _slowOrder(alice, true, 1e16, 1e15, 200);
         _slowOrder(bob, false, 1e16, 1e15, 200);
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
 
         (bool ok,, uint256 minDeliver,, uint256 payout) = hook.quoteFill();
         assertFalse(ok, "a fully matched batch needs no filler");
@@ -430,7 +430,7 @@ contract SettlementLifecycleTest is KesselTestBase {
     /// The refusals above are only meaningful against this.
     function test_quoteFillQuotesARealResidual() public {
         _slowOrder(alice, true, 1e16, 1e15, 200);
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
 
         (bool ok, Currency outCurrency, uint256 minDeliver, Currency inCurrency, uint256 payout) = hook.quoteFill();
         assertTrue(ok, "a one-sided batch must be fillable");
@@ -455,7 +455,7 @@ contract SettlementLifecycleTest is KesselTestBase {
     function test_anExternalFillOfAMatchedBatchMovesNoTokens() public {
         _slowOrder(alice, true, 1e16, 1e15, 200);
         _slowOrder(bob, false, 1e16, 1e15, 200);
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
 
         uint256 before0 = IERC20Like(Currency.unwrap(currency0)).balanceOf(carol);
         uint256 before1 = IERC20Like(Currency.unwrap(currency1)).balanceOf(carol);
@@ -484,7 +484,7 @@ contract SettlementLifecycleTest is KesselTestBase {
     ) internal {
         for (uint256 i; i < 3; ++i) {
             _slowOrder(bob, true, 1e15, 1, 8);
-            vm.roll(block.number + 5);
+            vm.roll(vm.getBlockNumber() + 5);
             _setPriorityFee(1 gwei);
             _fastSwap(true, -1e15);
         }
@@ -493,7 +493,7 @@ contract SettlementLifecycleTest is KesselTestBase {
         assertEq(v.owedOut, 0, "setup: an unreachable order should never have filled");
         assertGt(hook.currentEpoch(), v.epochExpiry, "setup: order should be past its epoch budget");
 
-        vm.roll(block.number + hook.maxDelay());
+        vm.roll(vm.getBlockNumber() + hook.maxDelay());
     }
 
     function _bal(

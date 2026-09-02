@@ -161,7 +161,7 @@ contract ScaffoldTest is KesselTestBase {
 
         // A Slow-Lane order, so a residual swap is issued by the hook itself.
         _slowOrder(alice, true, 1 ether, uint128(0.5 ether), 64);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         // A high priority fee, so a fee override applied to the residual would
         // be unmistakable: it saturates at MAX_FAST_FEE (5%).
         _setPriorityFee(100 gwei);

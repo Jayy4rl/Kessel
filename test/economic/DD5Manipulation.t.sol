@@ -222,7 +222,7 @@ contract DD5ManipulationTest is KesselTestBase {
             id1 = _slowOrder(bob, false, side1, uint128((side1 * 10_000) / (10_000 + c.slackBps)), 64);
         }
 
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
 
         (uint256 a0, uint256 a1) = _bal(attacker);
         _sandwichLegs(c.attackSize);
@@ -474,7 +474,7 @@ contract DD5ManipulationTest is KesselTestBase {
     function test_DD5_orderCountDoesNotChangeTheClearingPrice() public {
         _freshPool(500);
         _slowOrder(alice, true, 8 ether, uint128(4 ether), 64);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _setPriorityFee(0);
         _fastSwap(true, -1e15);
         (, uint160 pTwo,,,,,) = hook.epochs(1);
@@ -483,7 +483,7 @@ contract DD5ManipulationTest is KesselTestBase {
         for (uint256 i; i < 16; ++i) {
             _slowOrder(alice, true, 0.5 ether, uint128(0.25 ether), 64);
         }
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _setPriorityFee(0);
         _fastSwap(true, -1e15);
         (, uint160 pMany,,,,,) = hook.epochs(1);

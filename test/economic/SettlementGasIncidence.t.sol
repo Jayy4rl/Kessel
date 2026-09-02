@@ -45,7 +45,7 @@ contract SettlementGasIncidenceTest is KesselTestBase {
         uint256 swapSize
     ) internal returns (uint256 used) {
         _fresh();
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
         uint256 before = gasleft();
         _fastSwap(true, -int256(swapSize));
@@ -64,7 +64,7 @@ contract SettlementGasIncidenceTest is KesselTestBase {
             if (i % 2 == 0) _slowOrder(alice, true, 1e15, uint128(1e14), 200);
             else _slowOrder(bob, false, 1e15, uint128(1e14), 200);
         }
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         uint256 before = gasleft();

@@ -255,7 +255,7 @@ contract GovernanceTest is KesselTestBase {
     function test_pauseBlocksNewRiskButNeverStrandsFunds() public {
         uint256 id = _slowOrder(alice, true, 1e16, 1e15, 200);
         uint256 partner = _slowOrder(bob, false, 1e16, 1e15, 200);
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
         _fastSwap(true, -1e15);
         assertGt(_order(id).owedOut, 0, "setup: the order should have filled");

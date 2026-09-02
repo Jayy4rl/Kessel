@@ -59,7 +59,7 @@ contract FillerAttributionTest is KesselTestBase {
     function test_SR9_aFillerCannotBePaidOutOfStrayBalance() public {
         _slowOrder(alice, true, 1 ether, 1e15, 200);
         _slowOrder(bob, true, 1 ether, 1e15, 200);
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         (bool ok, Currency outCurrency, uint256 floorOut, Currency inCurrency, uint256 payout) = hook.quoteFill();
         assertTrue(ok, "setup: the batch should be fillable");
@@ -94,7 +94,7 @@ contract FillerAttributionTest is KesselTestBase {
     function test_SR9_aNoOpSettlementDoesNotConsumeTheDelivery() public {
         _slowOrder(alice, true, 1 ether, 100 ether, 200);
         _slowOrder(alice, true, 1 ether, 100 ether, 200);
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         uint256 offer = 5 ether;
         deal(Currency.unwrap(currency1), filler, offer);
@@ -119,7 +119,7 @@ contract FillerAttributionTest is KesselTestBase {
     function test_SR9_aSuccessfulFillLeavesNoRawBalance() public {
         uint256 id = _slowOrder(alice, true, 1 ether, 1e15, 200);
         _slowOrder(bob, true, 1 ether, 1e15, 200);
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         (bool ok, Currency outCurrency, uint256 floorOut,,) = hook.quoteFill();
         assertTrue(ok, "setup: the batch should be fillable");

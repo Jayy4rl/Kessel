@@ -79,7 +79,7 @@ contract FillIntakeReentrancyTest is KesselTestBase {
     function test_intakeIsRefusedDuringARedemptionPayout() public {
         uint256 id = attacker.submit(5 ether);
 
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _setPriorityFee(1 gwei);
         swapRouter.swap{value: 1e15}(
             key,

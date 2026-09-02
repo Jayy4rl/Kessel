@@ -150,7 +150,7 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
         bool zeroForOne,
         uint8 blocksSeed
     ) external {
-        vm.roll(block.number + bound(blocksSeed, 1, 20));
+        vm.roll(vm.getBlockNumber() + bound(blocksSeed, 1, 20));
 
         uint32 before = hook.oldestUnsettledEpoch();
         this.fastSwap(amountSeed, zeroForOne, 1 gwei);
@@ -161,7 +161,7 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
     function forceSettle(
         uint16 blocksSeed
     ) external {
-        vm.roll(block.number + bound(blocksSeed, 1, 4000));
+        vm.roll(vm.getBlockNumber() + bound(blocksSeed, 1, 4000));
         try hook.forceSettle() {
             ++settlements;
         } catch {}
@@ -191,7 +191,7 @@ contract KesselHandler is CommonBase, StdCheats, StdUtils {
         uint16 blocksSeed,
         uint8 behaviourSeed
     ) external {
-        vm.roll(block.number + bound(blocksSeed, 1, 400));
+        vm.roll(vm.getBlockNumber() + bound(blocksSeed, 1, 400));
         filler.setBehaviour(uint8(bound(behaviourSeed, 0, 200)));
         try filler.deliverAndSettle() {
             ++externalFills;

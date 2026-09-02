@@ -58,7 +58,7 @@ contract MultiRangeClearingTest is KesselTestBase {
 
         uint256 previous = 20 ether;
         for (uint256 i; i < 40 && _order(id).amountInRemaining > 0; ++i) {
-            vm.roll(block.number + 5);
+            vm.roll(vm.getBlockNumber() + 5);
             _setPriorityFee(1 gwei);
             _fastSwap(true, -1e15); // carries the batch
 
@@ -84,7 +84,7 @@ contract MultiRangeClearingTest is KesselTestBase {
         vm.prank(bob);
         uint256 b = _slowOrder(bob, true, 16 ether, 2 ether, 20);
 
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _setPriorityFee(1 gwei);
         _fastSwap(true, -1e15);
 
@@ -113,7 +113,7 @@ contract MultiRangeClearingTest is KesselTestBase {
         vm.prank(alice);
         uint256 id = _slowOrder(alice, true, 5_000 ether, 1 ether, 20);
 
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _setPriorityFee(1 gwei);
         _fastSwap(true, -1e15);
 

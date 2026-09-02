@@ -211,7 +211,7 @@ contract SlowLaneIntakeTest is KesselTestBase {
     /// which is precisely the selection MEV DD-12 exists to close.
     function test_DD12_slowSubmissionNeverTriggersSettlement() public {
         _slowOrder(alice, true, 1e17, 1, 8);
-        vm.roll(block.number + 50); // well past minSettleAge
+        vm.roll(vm.getBlockNumber() + 50); // well past minSettleAge
 
         _slowOrder(bob, true, 1e17, 1, 8);
 

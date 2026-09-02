@@ -55,7 +55,7 @@ contract ExpiryAndCensorshipTest is KesselTestBase {
         assertGt(hook.currentEpoch(), _order(id).epochExpiry, "setup: the epoch budget should have run out");
 
         // And past the block half, as it stood at intake.
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
 
         // Now stretch the parameter that used to define that half.
         vm.prank(governance);
@@ -107,7 +107,7 @@ contract ExpiryAndCensorshipTest is KesselTestBase {
         // The real batch.
         uint256 id = _slowOrder(alice, true, 1 ether, 1e15, 200);
 
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         (bool ok, Currency outCurrency, uint256 floorOut,,) = hook.quoteFill();
         assertTrue(ok, "setup: the batch should be fillable");
@@ -127,7 +127,7 @@ contract ExpiryAndCensorshipTest is KesselTestBase {
         _slowOrder(filler, true, 1 ether, 1e15, 200);
         _slowOrder(alice, true, 1 ether, 1e15, 200);
 
-        vm.roll(block.number + hook.minSettleAge() + 1);
+        vm.roll(vm.getBlockNumber() + hook.minSettleAge() + 1);
 
         vm.prank(filler);
         vm.expectRevert(KesselErrors.InvalidFiller.selector);

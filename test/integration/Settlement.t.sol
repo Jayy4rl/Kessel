@@ -28,7 +28,7 @@ contract SettlementTest is KesselTestBase {
     /// @dev Age the batch past `minSettleAge`, then trigger settlement the way
     /// the protocol intends: inside the `afterSwap` of a Fast-Lane swap.
     function _piggybackSettle() internal {
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _fastSwap(true, -1e15); // small, so it barely moves the price itself
     }
 
@@ -98,7 +98,7 @@ contract SettlementTest is KesselTestBase {
 
         // Settle without a price-moving trigger, so any movement observed is
         // attributable to the batch rather than to the trigger.
-        vm.roll(block.number + 400);
+        vm.roll(vm.getBlockNumber() + 400);
         hook.forceSettle();
 
         (uint160 priceAfter,,,) = manager.getSlot0(poolId);
@@ -124,7 +124,7 @@ contract SettlementTest is KesselTestBase {
 
         assertEq(_order(1).owedOut, 0, "batch settled in its opening block");
 
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _fastSwap(true, -1e15);
 
         assertGt(_order(1).owedOut, 0, "batch failed to settle once aged");
@@ -146,7 +146,7 @@ contract SettlementTest is KesselTestBase {
         vm.revertToState(snap);
 
         _slowOrder(alice, true, 1e16, 1, 8);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _fastSwap(true, -5e17); // move the pool against the batch, then settle
         uint256 disturbed = _order(1).owedOut;
 
@@ -277,7 +277,7 @@ contract SettlementTest is KesselTestBase {
         // until `absoluteMaxDelay`.
         _slowOrder(bob, true, 2e16, 1, 8);
         _slowOrder(carol, true, 2e16, 1, 8);
-        vm.roll(block.number + 400);
+        vm.roll(vm.getBlockNumber() + 400);
         hook.forceSettle();
         assertGt(_order(2).owedOut, 0, "forced path failed to settle");
         assertGt(_order(3).owedOut, 0, "forced path filled only part of the batch");
@@ -288,7 +288,7 @@ contract SettlementTest is KesselTestBase {
     /// (PRD §11 case 8).
     function test_nestedSwapDuringAfterSwapDoesNotCorruptTheTriggeringSwap() public {
         _slowOrder(alice, true, 3e16, 1, 8);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
 
         uint256 before = _bal(currency1, address(this));
         _fastSwap(true, -1e16);
@@ -311,7 +311,7 @@ contract SettlementTest is KesselTestBase {
         vm.expectRevert();
         hook.forceSettle();
 
-        vm.roll(block.number + uint256(hook.maxDelay()) + 1);
+        vm.roll(vm.getBlockNumber() + uint256(hook.maxDelay()) + 1);
         assertTrue(hook.forceSettleDue(), "force-settle should be due past maxDelay");
 
         hook.forceSettle();
@@ -327,12 +327,12 @@ contract SettlementTest is KesselTestBase {
 
         _slowOrder(alice, true, 2e16, 1, 200);
 
-        vm.roll(block.number + 150); // past maxDelay, below the size floor
+        vm.roll(vm.getBlockNumber() + 150); // past maxDelay, below the size floor
         assertFalse(hook.forceSettleDue(), "size floor should hold a lone order back");
         vm.expectRevert();
         hook.forceSettle();
 
-        vm.roll(block.number + 1000); // past absoluteMaxDelay: liveness escape
+        vm.roll(vm.getBlockNumber() + 1000); // past absoluteMaxDelay: liveness escape
         assertTrue(hook.forceSettleDue(), "I11: a lone order was stranded past the absolute bound");
 
         hook.forceSettle();
@@ -348,7 +348,7 @@ contract SettlementTest is KesselTestBase {
     /// consuming their gas. The piggyback path, which must never disturb the
     /// swap carrying it, does nothing at all.
     function test_emptyBatchIsANoOp() public {
-        vm.roll(block.number + 500);
+        vm.roll(vm.getBlockNumber() + 500);
 
         vm.expectRevert();
         hook.forceSettle(); // gated: nothing pending
@@ -370,7 +370,7 @@ contract SettlementTest is KesselTestBase {
         // gated and refuses outright; the piggyback path runs and finds nothing
         // fillable.
         _fastSwap(true, -1e15);
-        vm.roll(block.number + 500);
+        vm.roll(vm.getBlockNumber() + 500);
         vm.expectRevert();
         hook.forceSettle();
 
@@ -401,7 +401,7 @@ contract SettlementTest is KesselTestBase {
         // Expiry has two halves: the epoch budget above, and a block-age floor
         // that stops an attacker churning epochs to force early refunds. See
         // `AdversarialTest.test_epochChurnCannotExpireAnOrderEarly`.
-        vm.roll(block.number + hook.maxDelay());
+        vm.roll(vm.getBlockNumber() + hook.maxDelay());
 
         uint256 before = _bal(currency0, alice);
         hook.redeem(id);

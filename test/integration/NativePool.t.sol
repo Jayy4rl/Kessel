@@ -125,7 +125,7 @@ contract NativePoolTest is KesselTestBase {
             LaneCodec.encodeSlow(alice, 0.5 ether, 4)
         );
 
-        vm.roll(block.number + 10_000);
+        vm.roll(vm.getBlockNumber() + 10_000);
 
         vm.prank(alice);
         vm.expectRevert(KesselErrors.FillerPathRequiresERC20.selector);
@@ -147,7 +147,7 @@ contract NativePoolTest is KesselTestBase {
             );
         }
 
-        vm.roll(block.number + hook.maxDelay() + 1);
+        vm.roll(vm.getBlockNumber() + hook.maxDelay() + 1);
         assertTrue(hook.forceSettleDue(), "the batch should be forceable");
 
         hook.forceSettle();

@@ -34,7 +34,7 @@ contract ScaleTest is KesselTestBase {
         }
         assertEq(hook.orderCount(1), EPOCH_CAP, "setup: batch should be full");
 
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         uint256 before = gasleft();
@@ -69,7 +69,7 @@ contract ScaleTest is KesselTestBase {
             _slowOrder(alice, true, 1e15, uint128(1e14), 200);
             _slowOrder(bob, false, 1e15, uint128(1e14), 200);
         }
-        vm.roll(block.number + 10);
+        vm.roll(vm.getBlockNumber() + 10);
         _setPriorityFee(1 gwei);
 
         uint256 before = gasleft();
@@ -96,7 +96,7 @@ contract ScaleTest is KesselTestBase {
         _slowOrder(alice, true, 1e16, uint128(1e15), 200);
         _slowOrder(bob, false, 1e16, uint128(1e15), 200);
 
-        vm.roll(block.number + 4000);
+        vm.roll(vm.getBlockNumber() + 4000);
         hook.forceSettle();
 
         uint256 deferred0 = hook.lpClaimable0();

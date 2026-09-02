@@ -142,7 +142,7 @@ contract RedeemReentrancyTest is KesselTestBase {
     function _partiallyFilledOrder() internal returns (uint256 id) {
         id = attacker.submit(ORDER_SIZE);
 
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
         _carry();
 
         assertGt(_order(id).owedOut, 0, "setup: order should have accrued output");
@@ -151,7 +151,7 @@ contract RedeemReentrancyTest is KesselTestBase {
 
         // Let the rolled remainder's epoch age past `minSettleAge`, so the
         // settlement the attacker re-enters into is genuinely due.
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
     }
 
     /// @notice An order that still owes output must never be left in a terminal

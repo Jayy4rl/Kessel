@@ -58,7 +58,7 @@ contract ExternalFillTest is KesselTestBase {
     function _restingOrder() internal returns (uint256 id) {
         vm.prank(alice);
         id = _slowOrder(alice, true, 10 ether, 1 ether, 10);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
     }
 
     function _custodyCoversObligations() internal view {
@@ -86,7 +86,7 @@ contract ExternalFillTest is KesselTestBase {
     function test_aCurrency1ResidualIsFilledOnTheOtherSide() public {
         vm.prank(bob);
         uint256 id = _slowOrder(bob, false, 10 ether, 1 ether, 10);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
 
         (bool ok, Currency outCurrency,, Currency inCurrency,) = hook.quoteFill();
         assertTrue(ok, "a one-sided currency1 batch should be fillable");
@@ -224,7 +224,7 @@ contract ExternalFillTest is KesselTestBase {
         // `absoluteMaxDelay` rather than `maxDelay`: a lone order does not meet
         // DD-13's `minForceSettleOrders` floor, so the liveness escape is what
         // makes this batch forceable at all.
-        vm.roll(block.number + 3_100);
+        vm.roll(vm.getBlockNumber() + 3_100);
         hook.forceSettle();
 
         assertGt(_order(id).owedOut, 0, "batch was left unsettleable by a failed external fill");
@@ -346,7 +346,7 @@ contract ExternalFillTest is KesselTestBase {
         vm.prank(bob);
         uint256 b = _slowOrder(bob, false, 10 ether, 1 ether, 10);
         uint32 epoch = hook.currentEpoch();
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
 
         filler.setMode(MockFiller.Mode.GENEROUS);
         filler.settle();
@@ -372,7 +372,7 @@ contract ExternalFillTest is KesselTestBase {
         uint256 a = _slowOrder(alice, true, 10 ether, 1 ether, 10);
         vm.prank(bob);
         uint256 b = _slowOrder(bob, true, 30 ether, 3 ether, 10);
-        vm.roll(block.number + 5);
+        vm.roll(vm.getBlockNumber() + 5);
 
         filler.setMode(MockFiller.Mode.GENEROUS);
         filler.settle();
