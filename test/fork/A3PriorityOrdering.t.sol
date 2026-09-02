@@ -139,7 +139,18 @@ contract A3PriorityOrderingForkTest is Test {
         A3Fixture fixture = new A3Fixture();
         fixture.setUpOnFork();
 
+        // Pin the forked base fee into the execution context the swaps run in.
+        //
+        // Without this the test is measuring against a base fee it does not
+        // have: `block.basefee` reads as the real forked value here, but comes
+        // back ZERO inside the fixture's swap, so the hook sees a priority
+        // component of `base - 0` rather than the intended zero and charges
+        // `f_base + k*base/1gwei`. That produced a constant off-by-two at every
+        // priority level and read as a fee bug when the fee arithmetic was
+        // correct throughout.
         uint256 base = block.basefee;
+        vm.fee(base);
+
         uint24 atZero = fixture.feeChargedAt(base + 0);
         uint24 atOne = fixture.feeChargedAt(base + 1 gwei);
         uint24 atTen = fixture.feeChargedAt(base + 10 gwei);

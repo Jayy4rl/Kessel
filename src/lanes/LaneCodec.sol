@@ -3,27 +3,23 @@ pragma solidity 0.8.26;
 
 import {KesselErrors, Lane} from "../KesselTypes.sol";
 
-/// @notice Encoding and decoding of the per-swap `hookData` that selects a lane
-/// (PRD §2.2). Pure; owns DD-1 and the trader-identity resolution of DD-15.
+/// @notice Encoding and decoding of the per-swap `hookData` that selects a lane.
 ///
 /// Wire format:
 ///
-///   (empty)                                        -> FAST          (DD-1)
+///   (empty)                                        -> FAST
 ///   0x00                                           -> FAST
 ///   0x01 || abi.encode(address,uint128,uint32)     -> SLOW
-///   0xNN (anything else)                           -> FAST          (DD-1)
-///
-/// The SLOW payload is `(trader, minOut, expiryEpochs)`.
+///   0xNN (anything else)                           -> FAST
 ///
 /// Two asymmetries in the failure handling are deliberate:
 ///
-/// 1. An *unrecognised* lane byte falls through to FAST, per DD-1: an unaware
-///    caller is demanding an immediate fill by construction, and reverting
-///    would break every router that does not know about this hook.
+/// 1. An *unrecognised* lane byte falls through to FAST: an unaware caller is
+///    demanding an immediate fill by construction, and reverting would break
+///    every router that does not know about this hook.
 /// 2. A *recognised* SLOW byte with a malformed tail REVERTS. Defaulting it to
 ///    FAST would execute, immediately and at the higher fee, an order whose
-///    author explicitly asked for deferral. DD-1's default covers callers who
-///    said nothing, not callers who said something the hook could not parse.
+///    author explicitly asked for deferral.
 library LaneCodec {
     /// @dev Length of the SLOW payload: one lane byte plus three abi words.
     uint256 internal constant SLOW_DATA_LENGTH = 1 + 32 * 3;
@@ -40,7 +36,7 @@ library LaneCodec {
         bytes calldata hookData,
         address sender
     ) internal pure returns (Lane lane, address trader, uint128 minOut, uint32 expiryEpochs) {
-        // DD-1: empty hookData is the aggregator/unaware-caller case.
+        // Empty hookData is the aggregator / unaware-caller case.
         if (hookData.length == 0) return (Lane.FAST, address(0), 0, 0);
 
         uint8 laneByte = uint8(hookData[0]);
@@ -49,17 +45,15 @@ library LaneCodec {
             if (hookData.length != SLOW_DATA_LENGTH) revert KesselErrors.MalformedSlowOrder();
             (trader, minOut, expiryEpochs) = abi.decode(hookData[1:], (address, uint128, uint32));
 
-            // v4 hands the hook the *router* as `sender`, never the trader
-            // (reconnaissance finding A). The trader is therefore carried in
-            // the payload; falling back to `sender` keeps direct, router-less
-            // callers working. A trader must trust their router to encode them
-            // correctly -- the same trust already implied by approving it.
+            // v4 hands the hook the *router* as `sender`, never the trader, so
+            // the trader travels in the payload. Falling back to `sender` keeps
+            // direct, router-less callers working.
             if (trader == address(0)) trader = sender;
 
             return (Lane.SLOW, trader, minOut, expiryEpochs);
         }
 
-        // laneByte == FAST, or an unrecognised value: DD-1 default.
+        // FAST, or an unrecognised value.
         return (Lane.FAST, address(0), 0, 0);
     }
 
@@ -74,7 +68,7 @@ library LaneCodec {
     /// @param trader Beneficiary; pass `address(0)` to use the caller.
     /// @param minOut Minimum acceptable output for the full input. Becomes the
     /// order's limit price, so it is a price bound rather than a one-shot
-    /// slippage check (DD-11).
+    /// slippage check.
     /// @param expiryEpochs Epochs the order may rest before becoming refundable.
     function encodeSlow(
         address trader,

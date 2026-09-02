@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -189,7 +190,7 @@ contract FastLaneTest is KesselTestBase {
         (key,) = initPool(
             currency0,
             currency1,
-            hook,
+            IHooks(address(hook)),
             LPFeeLibrary.DYNAMIC_FEE_FLAG,
             TICK_SPACING * 2, // a different key => a different pool id
             SQRT_PRICE_1_1

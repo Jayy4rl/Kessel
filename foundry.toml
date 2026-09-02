@@ -52,7 +52,15 @@ fail_on_revert = false
 [profile.optimized]
 via_ir = true
 optimizer = true
-optimizer_runs = 44444444
+# Tuned for SIZE, not for runtime gas. `KesselHook` is close to EIP-170's
+# 24,576-byte ceiling, and `optimizer_runs` is the single largest lever on
+# that: at 44444444 the contract compiled to 40,304 bytes and could not be
+# deployed at all, while 200 brings it to ~25,000 with the same source.
+#
+# Raising this again without re-checking `forge build --sizes` will silently
+# produce an undeployable contract, because the test suite places runtime
+# bytecode with `vm.etch` and never exercises the limit.
+optimizer_runs = 200
 
 [profile.ci]
 via_ir = false

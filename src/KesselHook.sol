@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {BaseHook} from "@uniswap/uniswap-hooks/src/base/BaseHook.sol";
 import {CurrencySettler} from "@uniswap/uniswap-hooks/src/utils/CurrencySettler.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {BitMath} from "@uniswap/v4-core/src/libraries/BitMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
-import {LiquidityMath} from "@uniswap/v4-core/src/libraries/LiquidityMath.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {
     BeforeSwapDelta,
@@ -28,48 +24,10 @@ import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {Epoch, KesselErrors, KesselEvents, Lane, Order, OrderStatus} from "./KesselTypes.sol";
 import {FastLaneFee} from "./lanes/FastLaneFee.sol";
 import {LaneCodec} from "./lanes/LaneCodec.sol";
+import {BatchSolver} from "./settle/BatchSolver.sol";
 import {Clearing} from "./settle/Clearing.sol";
 
-/// @title Kessel — a two-lane execution hook on one shared liquidity curve
-///
-/// @notice Kessel offers two execution contracts on a single Uniswap v4 pool
-/// and lets the trader pick per swap (PRD §2.1):
-///
-///  * **Fast Lane** — an ordinary synchronous swap whose LP fee rises with the
-///    trader's revealed urgency, `f_base + k * priorityFeePerGas`. The premium
-///    is recaptured to LPs rather than left to the sequencer.
-///  * **Slow Lane** — the hook escrows the input and issues a non-transferable
-///    claim; the order clears later, in a batch, at one uniform price computed
-///    at *settlement* time.
-///
-/// The mechanism prices **immediacy**, not toxicity. It does not claim to
-/// remove adverse selection or LVR — see PRD §1.3 and §7.5 for the exact scope
-/// of every claim, and do not restate them more strongly than they are written.
-///
-/// ## Where each design decision lives
-///
-/// | DD | Subject | Home |
-/// |----|---------|------|
-/// | DD-1  | default lane            | `LaneCodec.decode` |
-/// | DD-2, DD-4 | urgency tax, `k`   | `FastLaneFee` |
-/// | DD-3  | passive subsidy         | `fSlow` is an independent parameter |
-/// | DD-5  | clearing price P        | `Clearing.solve` |
-/// | DD-6, DD-7, DD-13 | cadence, trigger, guards | `_settlementDue`, `forceSettle` |
-/// | DD-8  | `afterSwap` permission  | `getHookPermissions` |
-/// | DD-9  | non-cancellable         | absence of any cancel entry point |
-/// | DD-10 | recapture distribution  | fee override (fast) + `_recapture` (slow) |
-/// | DD-11 | failed `minOut`         | `_solveEligibleSet` |
-/// | DD-12 | settlement MEV          | settlement runs in `afterSwap` only |
-/// | DD-14 | native ETH              | `_openSlowOrder` |
-/// | DD-15 | claim + redemption      | `Order` struct, `redeem` |
-///
-/// ## Immutability
-///
-/// The permission bitmap is encoded in this contract's address, so it is frozen
-/// (DD-8). Settlement math cannot be patched. Every tunable is a bounded
-/// parameter with deploy-fixed bounds, and the guardian pause only ever lets
-/// funds *out* — it can never strand them (PRD §11 case 12).
-contract KesselHook is BaseHook, IUnlockCallback {
+contract KesselHook is IUnlockCallback {
     using CurrencySettler for Currency;
     using StateLibrary for IPoolManager;
     using SafeCast for uint256;
@@ -77,11 +35,6 @@ contract KesselHook is BaseHook, IUnlockCallback {
     uint256 internal constant Q96 = 1 << 96;
     uint256 internal constant FEE_DENOMINATOR = 1_000_000; // v4 fee units
     uint256 internal constant BPS_DENOMINATOR = 10_000;
-
-    // ------------------------------------------------------------------
-    // Deploy-fixed bounds. The hook is immutable, so these can never move;
-    // only the parameters inside them can (PRD §5.4 immutability constraint).
-    // ------------------------------------------------------------------
 
     uint24 internal constant F_BASE_MIN = 100; // 1 bp
     uint24 internal constant F_BASE_MAX = 100_000; // 10%
@@ -91,11 +44,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
     uint256 internal constant K_MIN = 0;
     uint256 internal constant K_MAX = 100_000; // 1 gwei => +10%
 
-    /// @dev Bound on `kGas`, the size-denominated tax multiplier (DD-4 as
-    /// amended). Units are gas, so `kGas * priorityFeePerGas` is an amount of
-    /// wei: at the ceiling, one gwei of priority costs 0.01 ETH of tax. Well
-    /// above any plausible calibration, and the fee cap binds long before it
-    /// on any ordinary trade size.
+
     uint256 internal constant K_GAS_MIN = 0;
     uint256 internal constant K_GAS_MAX = 10_000_000;
 
@@ -123,14 +72,9 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// @dev Eligibility rounds for the DD-11 shrinking-set iteration. The set
     /// shrinks monotonically, so this only bounds work, never correctness.
     uint256 internal constant MAX_CLEARING_ROUNDS = 4;
-    /// @dev Consecutive constant-liquidity ranges one settlement may walk when
-    /// solving a batch (gap-4 amendment to DD-5). Bounds gas, never
-    /// correctness: stopping early yields a smaller fill and the remainder
-    /// rolls, exactly as the single-range solver always did.
-    uint256 internal constant MAX_CLEARING_RANGES = 4;
 
-    /// @dev DD-5 residual cap, as a fraction of the analytic break-even. See
-    /// `_residualCap` for the derivation of the break-even itself.
+    /// @dev Residual cap, as a fraction of the analytic break-even. See
+    /// `BatchSolver._residualCap` for the derivation of the break-even itself.
     ///
     /// `RESIDUAL_CAP_BPS_MAX = 10_000` is exactly break-even and is a HARD
     /// deploy-fixed ceiling: no reachable governance setting can place the cap
@@ -166,6 +110,11 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// a hook serving two pools that share a currency could have one pool's
     /// settlement drain the other's escrow. OpenZeppelin's `BaseAsyncSwap`
     /// carries the same warning. Every callback rejects any other pool.
+    /// @dev The v4 singleton. Held here rather than inherited: Kessel
+    /// implements the two hook callbacks it actually uses directly, so the
+    /// eight it does not are absent from the ABI entirely.
+    IPoolManager public immutable poolManager;
+
     PoolKey internal immutablePoolKeyStorage;
     PoolId public immutable poolId;
     Currency public immutable currency0;
@@ -180,7 +129,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// deployment, and a governance switch that could flip it under a live pool
     /// would let the fee schedule change shape without changing a parameter
     /// anyone is watching.
-    uint8 public immutable gasTokenSide;
+    uint8 internal immutable gasTokenSide;
 
     // ------------------------------------------------------------------
     // Bounded governance parameters
@@ -201,14 +150,14 @@ contract KesselHook is BaseHook, IUnlockCallback {
     uint32 public minSettleAge = 2; // blocks (DD-6, guards I6)
     uint32 public maxDelay = 300; // blocks (I11)
     uint32 public absoluteMaxDelay = 3_000; // blocks (DD-13 liveness escape)
-    uint32 public minForceSettleOrders = 2; // DD-13 anti-grief size floor
+    uint32 internal minForceSettleOrders = 2; // DD-13 anti-grief size floor
     uint16 public expiryForfeitBps = 10; // 0.10% (DD-9)
 
     /// @dev DD-5 (ratified 2026-09-01): how much of the analytic break-even
     /// residual a single settlement may push through the curve. Default 50%,
     /// i.e. half the residual at which sandwiching the settlement would start
     /// to pay, leaving a 2x margin against the model's own error.
-    uint16 public residualCapBps = 5_000;
+    uint16 internal residualCapBps = 5_000;
 
     /// @dev I9: warehoused exposure cap, per direction, denominated in that
     /// direction's *input token units*. A common numeraire would need a price,
@@ -280,6 +229,11 @@ contract KesselHook is BaseHook, IUnlockCallback {
         SETTLE_WITH_FILL
     }
 
+    modifier onlyPoolManager() {
+        if (msg.sender != address(poolManager)) revert KesselErrors.NotPoolManager();
+        _;
+    }
+
     modifier onlyGovernance() {
         if (msg.sender != governance) revert KesselErrors.NotGovernance();
         _;
@@ -314,7 +268,10 @@ contract KesselHook is BaseHook, IUnlockCallback {
         int24 _tickSpacing,
         address _governance,
         uint8 _gasTokenSide
-    ) BaseHook(_poolManager) {
+    ) {
+        poolManager = _poolManager;
+        Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
+
         // Same reasoning as `setGovernance`: an immutable hook deployed with no
         // governance can never have a parameter changed again.
         if (_governance == address(0)) revert KesselErrors.ParameterOutOfBounds();
@@ -354,7 +311,6 @@ contract KesselHook is BaseHook, IUnlockCallback {
     // Hook permissions — FROZEN (DD-8, PRD §8.1)
     // ==================================================================
 
-    /// @inheritdoc BaseHook
     /// @dev v4 encodes these bits in the contract address, so changing this
     /// function changes the address and invalidates any mined one.
     ///
@@ -364,7 +320,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// piggyback settlement is safe. The Fast-Lane premium needs no post-swap
     /// step at all — the dynamic fee override *is* the LP fee, and v4 credits
     /// it to in-range liquidity itself.
-    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+    function getHookPermissions() public pure returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
@@ -387,12 +343,35 @@ contract KesselHook is BaseHook, IUnlockCallback {
     // beforeSwap — lane routing (PRD §8.3)
     // ==================================================================
 
+    /// @notice v4 swap callback. Only the two callbacks this hook's permission
+    /// bitmap enables exist on this contract; v4 can never invoke the others,
+    /// so carrying reverting stubs for them only costs bytecode.
+    function beforeSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata hookData
+    ) external onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
+        return _beforeSwap(sender, key, params, hookData);
+    }
+
+    /// @notice v4 post-swap callback. Carries piggyback settlement.
+    function afterSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) external onlyPoolManager returns (bytes4, int128) {
+        return _afterSwap(sender, key, params, delta, hookData);
+    }
+
     function _beforeSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata hookData
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+    ) private returns (bytes4, BeforeSwapDelta, uint24) {
         if (PoolId.unwrap(key.toId()) != PoolId.unwrap(poolId)) revert KesselErrors.UnknownPool();
 
         (Lane lane, address trader, uint128 minOut, uint32 expiryEpochs) = LaneCodec.decode(hookData, sender);
@@ -625,7 +604,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
         SwapParams calldata,
         BalanceDelta,
         bytes calldata hookData
-    ) internal override returns (bytes4, int128) {
+    ) private returns (bytes4, int128) {
         if (PoolId.unwrap(key.toId()) != PoolId.unwrap(poolId)) revert KesselErrors.UnknownPool();
 
         (Lane lane,,,) = LaneCodec.decode(hookData, address(0));
@@ -989,6 +968,18 @@ contract KesselHook is BaseHook, IUnlockCallback {
     /// seller leaves a harmless surplus, but dropping a currency1 seller leaves
     /// a **deficit**. See DD-11 for why the PRD's recommended refund-on-
     /// violation policy is unsound rather than merely simpler.
+    /// @dev Bundled separately to keep `_solveEligibleSet` within the EVM stack
+    /// limit under the non-`via_ir` dev profile.
+    function _solverParams() private view returns (BatchSolver.Params memory) {
+        return BatchSolver.Params({
+            poolManager: poolManager,
+            poolId: poolId,
+            tickSpacing: tickSpacing,
+            fBase: fBase,
+            residualCapBps: residualCapBps
+        });
+    }
+
     function _solveEligibleSet(
         Cand[] memory c
     ) private view returns (Clearing.Solution memory sol, uint256 net0, uint256 net1, bool converged) {
@@ -996,7 +987,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
             (net0, net1) = _aggregateNet(c);
             if (net0 == 0 && net1 == 0) return (sol, 0, 0, true);
 
-            sol = _solveMultiRange(net0, net1);
+            sol = BatchSolver.solveMultiRange(_solverParams(), net0, net1);
             if (!sol.feasible) return (sol, net0, net1, false);
 
             if (_dropIneligible(c, sol.priceX96) == 0) return (sol, net0, net1, true);
@@ -1004,271 +995,6 @@ contract KesselHook is BaseHook, IUnlockCallback {
 
         // Round budget exhausted without a self-consistent set.
         return (sol, net0, net1, false);
-    }
-
-    /// @dev Solve the batch across up to `MAX_CLEARING_RANGES` consecutive
-    /// constant-liquidity ranges (gap-4 amendment to DD-5).
-    ///
-    /// `Clearing.solve` is exact only inside one range, because the closed form
-    /// assumes constant `L`. Previously that meant a batch big enough to reach
-    /// an initialised tick was clamped to the boundary and partially filled,
-    /// with the remainder rolling to the next epoch — so a large order could
-    /// take several settlements to complete for no reason other than the
-    /// solver's own horizon.
-    ///
-    /// This walks instead. Each iteration calls `solve` with that range's own
-    /// liquidity and whatever of the batch is still unfilled, then crosses the
-    /// boundary tick exactly as v4's own swap loop does — negating
-    /// `liquidityNet` when moving down, and stepping the tick to `next - 1` in
-    /// that direction. Every `solve` call therefore still sees a single
-    /// constant-`L` range and stays exact.
-    ///
-    /// The walk only has to produce a good *target*: `Clearing.fillRatio`
-    /// derives the actual fill from what the pool really did, so an imprecise
-    /// prediction costs a smaller fill, never solvency (I2) and never a
-    /// non-uniform price (I4). That is why an iterative approximation is
-    /// admissible here at all.
-    ///
-    /// The residual direction cannot flip between ranges: both sides of the
-    /// batch scale by the same `lambda`, so a batch that is net-selling
-    /// currency0 stays net-selling currency0 however much of it is consumed.
-    /// @dev DD-5's closure: the largest residual this settlement may push
-    /// through the curve, in the residual's own input currency.
-    ///
-    /// ## The derivation
-    ///
-    /// `docs/DD5-SIMULATION.md` measured, against the real contracts, that
-    /// sandwiching the settlement residual is profitable at every reachable
-    /// `k`. Its extraction model is
-    ///
-    ///     extraction  =  2 * y * A * R / x^2          (in currency1)
-    ///
-    /// for an attacker size `A` and a residual `R`, against the attacker's own
-    /// cost of `f_base` on each of two legs,
-    ///
-    ///     cost        =  2 * f_base * A * y / x .
-    ///
-    /// **`A` appears linearly on both sides and cancels.** Whether the attack
-    /// pays is therefore not a question about the attacker's size, or about
-    /// `k`, or about how much slack traders left in their limits — it is
-    /// decided by the residual alone:
-    ///
-    ///     unprofitable   <=>   R  <=  f_base * x
-    ///
-    /// where `x` is the pool's virtual reserve of the residual's input currency.
-    /// Checked against the simulation's own sweep: the analytic break-even is
-    /// 0.285 ether and the measured one 0.301 ether on a 95-ether-deep pool, a
-    /// 5% agreement with no fitting.
-    ///
-    /// ## Why this and not the other three options
-    ///
-    /// The simulation outlines four closures and recommends the first, a
-    /// begin-of-epoch price band, as "the only one that bounds the attack
-    /// independently of both trader behaviour and `k`". The cancellation above
-    /// shows this one does too, and it costs materially less:
-    ///
-    ///  * A price band anchored at epoch open would tell a trader submitting
-    ///    into a fresh epoch that their fill lands within `±delta` of the price
-    ///    they can see. That is a two-sided bound known at submission, which is
-    ///    precisely the hedging surface I6 exists to close. This cap carries no
-    ///    submission-time information at all: it is a function of settlement-
-    ///    time liquidity and price.
-    ///  * A price band's failure mode is *refuse to settle*, which fights I11
-    ///    and needs the `absoluteMaxDelay` escape re-argued. This cap's failure
-    ///    mode is *fill less of the batch this epoch*, which is the partial-fill
-    ///    path DD-11 already specifies, SR-1 already made safe, and the tick
-    ///    clamp already exercises on every large batch.
-    ///  * A floor on limit tightness (option 3) refuses orders traders meant to
-    ///    place, and makes the defence depend on tuning against trader
-    ///    behaviour rather than against pool state.
-    ///
-    /// The cap constrains only the *un-netted* part of a batch. Extraction on
-    /// the coincidence-of-wants portion is exactly zero — the simulation
-    /// measures it as such — so netting is left entirely unconstrained and the
-    /// mechanism's own best case is untouched.
-    ///
-    /// @param sqrtPriceX96 Settlement-time price.
-    /// @param liquidity Active liquidity in the range being solved.
-    /// @param zeroForOne Direction of the residual.
-    function _residualCap(
-        uint160 sqrtPriceX96,
-        uint128 liquidity,
-        bool zeroForOne
-    ) private view returns (uint256) {
-        if (liquidity == 0 || sqrtPriceX96 == 0) return 0; // uncapped: nothing to trade against
-
-        // Virtual reserve of the residual's INPUT currency:
-        //   currency0 (zeroForOne):  x = L / sqrtP  =  L * Q96 / sqrtPriceX96
-        //   currency1 (oneForZero):  y = L * sqrtP  =  L * sqrtPriceX96 / Q96
-        uint256 reserve =
-            zeroForOne ? FullMath.mulDiv(liquidity, Q96, sqrtPriceX96) : FullMath.mulDiv(liquidity, sqrtPriceX96, Q96);
-
-        // R_max = f_base * reserve * residualCapBps, with f_base in v4 fee
-        // units (1e6) and the safety factor in bps (1e4).
-        uint256 cap = FullMath.mulDiv(reserve, uint256(fBase) * residualCapBps, FEE_DENOMINATOR * BPS_DENOMINATOR);
-
-        // A cap of zero would read as "uncapped" downstream. One wei is the
-        // correct floor: it caps hard without ever disabling the bound.
-        return cap == 0 ? 1 : cap;
-    }
-
-    function _solveMultiRange(
-        uint256 net0,
-        uint256 net1
-    ) private view returns (Clearing.Solution memory out) {
-        (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
-        uint128 liquidity = poolManager.getLiquidity(poolId);
-
-        uint256 rem0 = net0;
-        uint256 rem1 = net1;
-
-        // DD-5's cap is a bound on the TOTAL residual this settlement pushes
-        // through the curve, so it is sized once against the depth at spot and
-        // then spent down across the walk. The residual's direction follows
-        // from the batch alone — the curve is sold currency0 exactly when the
-        // batch is net-selling it — and cannot flip between ranges, because
-        // both sides scale by the same lambda.
-        uint256 capBudget;
-        {
-            uint256 spotX96 = FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, Q96);
-            bool residualZeroForOne = net1 < FullMath.mulDiv(net0, spotX96, Q96);
-            capBudget = _residualCap(sqrtPriceX96, liquidity, residualZeroForOne);
-        }
-
-        for (uint256 r; r < MAX_CLEARING_RANGES; ++r) {
-            (int24 lowerTick, int24 upperTick) = _activeRangeTicks(tick);
-
-            Clearing.Solution memory seg = Clearing.solve(
-                Clearing.PoolPoint({
-                    sqrtPriceX96: sqrtPriceX96,
-                    liquidity: liquidity,
-                    lowerSqrtPriceX96: TickMath.getSqrtPriceAtTick(lowerTick),
-                    upperSqrtPriceX96: TickMath.getSqrtPriceAtTick(upperTick),
-                    maxResidualIn: capBudget
-                }),
-                rem0,
-                rem1
-            );
-
-            // An infeasible range ends the walk. Anything already accumulated
-            // stands: a partial answer is a valid target, and it is strictly
-            // better than the single-range answer it started from.
-            if (!seg.feasible) break;
-
-            out.feasible = true;
-            out.zeroForOne = seg.zeroForOne;
-            out.sqrtPriceTargetX96 = seg.sqrtPriceTargetX96;
-            out.residualIn += seg.residualIn;
-            out.residualOut += seg.residualOut;
-            out.clamped = seg.clamped;
-
-            // Unclamped: the whole remaining batch cleared inside this range,
-            // which is the terminating case and the common one.
-            if (!seg.clamped) break;
-
-            // Clamped with nothing moving means the range had no room at all.
-            if (seg.residualIn == 0 || seg.residualOut == 0) break;
-
-            // The cap is a budget for the whole walk, not for each range.
-            capBudget = capBudget > seg.residualIn ? capBudget - seg.residualIn : 0;
-            if (capBudget == 0) break; // DD-5 bound reached; the rest rolls.
-
-            uint256 lambda = seg.zeroForOne
-                ? Clearing.fillRatio(rem0, rem1, seg.residualIn, seg.residualOut)
-                : Clearing.fillRatio(rem1, rem0, seg.residualIn, seg.residualOut);
-            // `0` is an inconsistent fill and `Q96` is a complete one; neither
-            // leaves a remainder for a further range to absorb.
-            if (lambda == 0 || lambda >= Q96) break;
-
-            rem0 -= FullMath.mulDiv(rem0, lambda, Q96);
-            rem1 -= FullMath.mulDiv(rem1, lambda, Q96);
-            if (rem0 == 0 && rem1 == 0) break;
-
-            // Cross the boundary. An uninitialised tick — which is what a
-            // bitmap-word edge is — reports a zero `liquidityNet`, so this
-            // correctly leaves liquidity untouched and simply continues the
-            // scan from further along. No special case is needed for it.
-            int24 crossed = seg.zeroForOne ? lowerTick : upperTick;
-            (, int128 liquidityNet) = poolManager.getTickLiquidity(poolId, crossed);
-            if (seg.zeroForOne) liquidityNet = -liquidityNet;
-            liquidity = LiquidityMath.addDelta(liquidity, liquidityNet);
-            if (liquidity == 0) break; // no depth beyond this tick
-
-            sqrtPriceX96 = seg.sqrtPriceTargetX96;
-            tick = seg.zeroForOne ? crossed - 1 : crossed;
-        }
-
-        if (!out.feasible) return out;
-        out.priceX96 = _predictedPrice(out, net0, net1);
-        if (out.priceX96 == 0) out.feasible = false;
-    }
-
-    /// @dev The uniform price the walk predicts, taken from the residual itself.
-    ///
-    /// `a * b` is the average price of a move within *one* constant-liquidity
-    /// range, and is simply not the average once the walk has crossed a tick.
-    /// So the price has to come from the trade the walk actually sized.
-    ///
-    /// It comes from the residual and nothing else:
-    ///
-    ///   zeroForOne residual:  P = residualOut / residualIn   (pool pays c1)
-    ///   oneForZero residual:  P = residualIn  / residualOut  (pool takes c1)
-    ///
-    /// This is exact for any number of ranges AND for any fill ratio, which is
-    /// the property that matters. `Clearing.fillRatio`'s own algebra gives it
-    /// directly: equalising the two sides' implied prices yields `P = Y / X`
-    /// for the realised `(X, Y)`, with the batch totals cancelling out entirely.
-    ///
-    /// SR-8. This function previously used the *totals* identity —
-    /// `P = (residualOut + N1) / N0` and `P = (N1 - residualIn) / N0` — which
-    /// is the solvency relation **at a fill ratio of one**. The general
-    /// relation carries lambda: `P = (Y + lambda*N1) / (lambda*N0)`. Whenever a
-    /// batch was clamped (bigger than the depth the walk could absorb), lambda
-    /// was dropped and the eligibility price came out wrong by a factor of
-    /// roughly 1/lambda — understated for a zeroForOne residual, overstated for
-    /// a oneForZero one, i.e. wrong in the unsafe direction for exactly the
-    /// side whose limit was the binding one. `_dropIneligible` then admitted
-    /// orders that the realised price did not satisfy and they were filled
-    /// through their `minOut`, breaking I8. Solvency was never affected —
-    /// `fillRatio` guarantees I2 and I4 whatever the prediction says — which is
-    /// why no invariant caught it.
-    ///
-    /// The single-range predecessor (`Clearing.solve`'s `a * b`) was correct
-    /// under clamping, because `a * b` IS `Y / X`. The multi-range amendment
-    /// replaced a correct formula with one that only held in the unclamped
-    /// case; this restores the property while keeping the multi-range answer.
-    ///
-    /// This is a prediction used for the eligibility test only. Payouts are
-    /// computed from what the pool actually returned, so a prediction that is
-    /// a few wei off costs an order its place in this batch at worst, never
-    /// solvency.
-    function _predictedPrice(
-        Clearing.Solution memory out,
-        uint256 net0,
-        uint256 net1
-    ) private pure returns (uint160) {
-        // A perfectly matched batch never touches the curve, so the totals
-        // identity degenerates. Its price is the coincidence-of-wants price.
-        if (out.residualIn == 0) {
-            if (net0 == 0) return 0;
-            return _toUint160(FullMath.mulDiv(net1, Q96, net0));
-        }
-
-        // A residual that moves in one direction only cannot imply a price.
-        if (out.residualOut == 0) return 0;
-
-        // `P = Y / X`, in currency1-per-currency0 both ways round: the pool
-        // pays currency1 for a zeroForOne residual and takes it for the other.
-        if (out.zeroForOne) {
-            return _toUint160(FullMath.mulDiv(out.residualOut, Q96, out.residualIn));
-        }
-        return _toUint160(FullMath.mulDiv(out.residualIn, Q96, out.residualOut));
-    }
-
-    function _toUint160(
-        uint256 x
-    ) private pure returns (uint160) {
-        return x > type(uint160).max ? type(uint160).max : uint160(x);
     }
 
     /// @dev Aggregate net-of-fee input per direction over the live candidates.
@@ -1802,7 +1528,7 @@ contract KesselHook is BaseHook, IUnlockCallback {
         uint256 diff = priceA > priceB ? priceA - priceB : priceB - priceA;
         uint256 scale = priceA > priceB ? priceA : priceB;
 
-        require(diff * 1_000_000 <= scale * I4_TOLERANCE_PPM, "I4: non-uniform clearing price");
+        if (diff * 1_000_000 > scale * I4_TOLERANCE_PPM) revert KesselErrors.NonUniformClearingPrice();
     }
 
     /// @dev Route `f_slow` to LPs (I5, DD-10a), with PRD §6.2's mandatory
@@ -2082,109 +1808,6 @@ contract KesselHook is BaseHook, IUnlockCallback {
     // ==================================================================
     // Internals
     // ==================================================================
-
-    /// @dev Bounds of the range over which active liquidity is constant, as
-    /// ticks. The multi-range walk needs the tick itself rather than only its
-    /// price, because it has to read `liquidityNet` at the boundary it crosses.
-    ///
-    /// Liquidity changes only at *initialised* ticks, so this searches the tick
-    /// bitmap rather than snapping to the next multiple of `tickSpacing`. The
-    /// distinction is not cosmetic: most spacing multiples carry no position,
-    /// and clamping to them would force nearly every batch into a partial fill.
-    ///
-    /// When a word contains no initialised tick, its boundary is returned —
-    /// which is still a correct bound, since no liquidity change can occur
-    /// before it.
-    function _activeRangeTicks(
-        int24 tick
-    ) private view returns (int24 lowerTick, int24 upperTick) {
-        int24 spacing = tickSpacing;
-        int24 compressed = tick / spacing;
-        if (tick < 0 && tick % spacing != 0) compressed--;
-
-        lowerTick = _scanDown(compressed, spacing);
-        upperTick = _scanUp(compressed, spacing);
-    }
-
-    /// @dev Words of tick bitmap to scan in each direction before giving up and
-    /// using the last word boundary reached. That boundary is always a *safe*
-    /// bound — no liquidity change can occur before it — so the budget trades
-    /// fill size for gas, never correctness.
-    ///
-    /// Scanning more than one word is not optional. A single-word search
-    /// returns the word's own edge when the word holds no initialised tick, and
-    /// at bit position 0 that edge IS the current price — a zero-width range.
-    /// Tick 0, the usual initialisation price, sits at exactly that position.
-    uint256 internal constant MAX_BITMAP_WORDS = 8;
-
-    /// @dev Cursor arithmetic is done in `int256`, not `int24`.
-    ///
-    /// A word step moves the cursor by up to 256 compressed ticks, and the
-    /// cursor is only converted back to a tick by multiplying by the spacing.
-    /// For a wide-spaced pool that product leaves `int24` range after a single
-    /// step off the end of the initialised ticks -- `-257 * 32767` is already
-    /// past `int24` min -- and the checked multiplication would then panic
-    /// *inside* settlement. On an immutable, pool-bound hook that is permanent:
-    /// every settlement for that pool reverts forever. Widening the cursor and
-    /// clamping at the end keeps the out-of-range case doing what it should,
-    /// which is to return the tick range's own boundary.
-    function _scanDown(
-        int24 compressed,
-        int24 spacing
-    ) private view returns (int24) {
-        int256 cursor = compressed;
-        int256 sp = spacing;
-
-        for (uint256 w; w < MAX_BITMAP_WORDS; ++w) {
-            (int16 wordPos, uint8 bitPos) = _position(int24(cursor));
-            uint256 masked = poolManager.getTickBitmap(poolId, wordPos) & ((1 << bitPos) - 1 + (1 << bitPos));
-
-            if (masked != 0) {
-                return _clampTick((cursor - int256(uint256(bitPos - BitMath.mostSignificantBit(masked)))) * sp);
-            }
-            // Step to the last compressed tick of the word below and continue.
-            cursor = cursor - int256(uint256(bitPos)) - 1;
-            if (cursor * sp <= TickMath.MIN_TICK) break;
-        }
-        return _clampTick(cursor * sp);
-    }
-
-    function _scanUp(
-        int24 compressed,
-        int24 spacing
-    ) private view returns (int24) {
-        int256 cursor = int256(compressed) + 1;
-        int256 sp = spacing;
-
-        for (uint256 w; w < MAX_BITMAP_WORDS; ++w) {
-            (int16 wordPos, uint8 bitPos) = _position(int24(cursor));
-            uint256 masked = poolManager.getTickBitmap(poolId, wordPos) & ~((1 << bitPos) - 1);
-
-            if (masked != 0) {
-                return _clampTick((cursor + int256(uint256(BitMath.leastSignificantBit(masked) - bitPos))) * sp);
-            }
-            cursor = cursor + int256(uint256(type(uint8).max - bitPos)) + 1;
-            if (cursor * sp >= TickMath.MAX_TICK) break;
-        }
-        return _clampTick(cursor * sp);
-    }
-
-    function _clampTick(
-        int256 t
-    ) private pure returns (int24) {
-        if (t < TickMath.MIN_TICK) return TickMath.MIN_TICK;
-        if (t > TickMath.MAX_TICK) return TickMath.MAX_TICK;
-        return int24(t);
-    }
-
-    function _position(
-        int24 compressed
-    ) private pure returns (int16 wordPos, uint8 bitPos) {
-        assembly ("memory-safe") {
-            wordPos := sar(8, compressed)
-            bitPos := and(compressed, 0xff)
-        }
-    }
 
     function _netOfSlowFee(
         uint256 gross,
