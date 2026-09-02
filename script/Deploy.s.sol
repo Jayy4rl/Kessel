@@ -13,6 +13,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {HookMiner} from "@uniswap/v4-periphery/test/shared/HookMiner.sol";
 
 import {KesselHook} from "../src/KesselHook.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+
 import {BatchSolver} from "../src/settle/BatchSolver.sol";
 
 /// @notice Deployment is TWO phases, and they cannot be merged.
@@ -199,5 +201,38 @@ contract DeployKessel is Script {
         if (hook_.maxWarehouse0() == type(uint128).max && hook_.maxWarehouse1() == type(uint128).max) {
             console2.log("WARNING: maxWarehouse is unbounded -- the warehoused-exposure cap is INACTIVE.");
         }
+    }
+}
+
+/// @notice Phase 0, testnets only. Two ERC-20s to build a pool from.
+///
+/// @dev A first deployment needs a pair, and on a testnet there is rarely one
+/// worth using. These are plain mintable mocks: they are NOT a product, and
+/// nothing about them should be reused on mainnet, where you supply real token
+/// addresses instead.
+///
+/// The pair is sorted before being reported, because v4 requires
+/// `currency0 < currency1` and the hook derives its immutable pool binding from
+/// that key — getting the order wrong produces a hook bound to a pool that will
+/// never exist.
+contract DeployTestTokens is Script {
+    function run() external returns (address token0, address token1) {
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(pk);
+
+        vm.startBroadcast(pk);
+        MockERC20 a = new MockERC20("Kessel Test A", "KTA", 18);
+        MockERC20 b = new MockERC20("Kessel Test B", "KTB", 18);
+        a.mint(deployer, 1_000_000 ether);
+        b.mint(deployer, 1_000_000 ether);
+        vm.stopBroadcast();
+
+        (token0, token1) =
+            address(a) < address(b) ? (address(a), address(b)) : (address(b), address(a));
+
+        console2.log("minted 1,000,000 of each to", deployer);
+        console2.log("");
+        console2.log("CURRENCY0=%s", token0);
+        console2.log("CURRENCY1=%s", token1);
     }
 }
