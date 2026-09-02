@@ -27,6 +27,10 @@ fs_permissions = [
     # object is unparseable in Solidity). Read-only on purpose — the test must
     # not be able to rewrite the evidence it asserts against.
     { access = "read", path = "./test/fork/data" },
+    # Read-only for the same reason: `test/property/ClearingDifferential.t.sol`
+    # asserts against a fixture produced by `script/clearing_reference.py`, and
+    # must not be able to rewrite the evidence it checks itself against.
+    { access = "read", path = "./test/data" },
 ]
 
 # v4-core's test helpers use `vm.expectRevert` on internal calls.

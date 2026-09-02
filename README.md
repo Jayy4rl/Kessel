@@ -11,7 +11,7 @@ Letting traders self-select by urgency is a screening mechanism: it prices **imm
 
 **Implemented and tested; not reviewed by a human.**
 
-`src/` holds `KesselHook.sol` plus four libraries. **227 tests pass**, including all twelve protocol invariants as real stateful assertions (256 runs × 16,384 calls, zero reverts). Two tests skip without an RPC endpoint — see [Testing](#testing).
+`src/` holds `KesselHook.sol` plus four libraries. **258 tests pass** on both compiler pipelines, including all twelve protocol invariants as real stateful assertions (256 runs × 16,384 calls, zero reverts). Two of them need a Base RPC endpoint and skip without one — see [Testing](#testing).
 
 `docs/PRD.md` is the canonical specification and the document to review against.
 
@@ -23,7 +23,7 @@ forge build
 forge test
 ```
 
-Expect `227 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves of the A3 fork test and are explained below; nothing else requires configuration.
+Expect `258 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves of the A3 fork test and are explained below; set `BASE_RPC_URL` to run them and the count becomes 258 passed, 0 skipped. Nothing else requires configuration.
 
 Dependencies nest — `v4-core` and `permit2` are submodules of `v4-periphery` — so `--recursive` is required, not optional.
 
@@ -78,12 +78,44 @@ The hook is immutable and bound to a single pool at construction. That binding i
 | Directory | What it covers |
 |---|---|
 | `test/invariant/` | All twelve invariants as stateful assertions, none skipped, driven by `KesselHandler`. A thirteenth proves a run was not vacuous. |
-| `test/property/` | Fuzz tests over the pure libraries, including against v4's own `SqrtPriceMath`. |
+| `test/property/` | Fuzz tests over the pure libraries, including against v4's own `SqrtPriceMath`, plus the differential test described below. |
 | `test/integration/` | Fast Lane, Slow Lane, settlement, lifecycle, governance, multi-range clearing, native and gas-token pools. |
 | `test/security/` | Adversarial tests. Each was written before its fix and observed to fail first, so each is a regression lock: if one starts failing, a closed attack has reopened. |
 | `test/scaffold/` | Pins upstream v4 behaviours the design depends on. A failure here after a dependency bump means an assumption changed, not that a test is flaky. |
 | `test/economic/` | Measurements rather than assertions: settlement-gas incidence, `k` calibration, clearing-price manipulation. |
 | `test/fork/` | Assumption A3 — that the target chain orders by priority fee. |
+
+### The settlement price is checked against an independent model
+
+Every other test checks the clearing price against *itself*: the invariants
+confirm a batch is solvent and uniformly priced whatever price the solver
+picked — which stays true even if the solver picks the wrong one. Since the
+settlement formula is the one part of the protocol that can never be patched,
+it is also checked against arithmetic that shares no code with it.
+
+`script/clearing_reference.py` does two things Solidity cannot:
+
+1. It proves the closed form satisfies `L*(a-b) = N0*a*b - N1` — the solvency
+   equation the derivation claims to solve — **exactly**, in rationals. That is
+   not a re-implementation of the same formula, which would be circular; it is
+   a check against the condition the formula is derived from.
+2. It evaluates that form with `fractions.Fraction`, so the emitted fixture
+   carries no rounding at all.
+
+`test/property/ClearingDifferential.t.sol` replays the fixture through the real
+contract, whose integer arithmetic floors at every step, and asserts they agree.
+A contract computing a different formula diverges by orders of magnitude.
+
+```bash
+python script/clearing_reference.py        # regenerate; the seed is fixed
+forge test --match-path 'test/property/ClearingDifferential.t.sol'
+```
+
+Measured divergence is ~1e-25 relative, against the 1e-6 tolerance the
+post-settlement limit re-check runs with. Note the rounding has no guaranteed
+*direction*: flooring shrinks the closed form's numerator and denominator in
+opposite senses, so the error can fall either way. The test asserts a bound, not
+a sign.
 
 **The two skipped tests.** `test/fork/A3PriorityOrdering.t.sol` contains two tests that fork Base mainnet and need `BASE_RPC_URL` set to an **archive** endpoint. Without it they skip with an explanatory message rather than silently passing, because a local mock would only prove the mock was written to pass.
 
