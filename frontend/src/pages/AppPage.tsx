@@ -14,9 +14,28 @@ import { asPercent } from "../lib/fee";
 import { FAST_DATA, POOL_KEY, STATUS, TEST_SETTINGS, priceLimit, slowData } from "../lib/pool";
 import { erc20Abi, lpRouterAbi, swapRouterAbi } from "../lib/routers";
 import { wagmiConfig } from "../lib/wagmi";
-import { useKessel } from "../lib/useKessel";
+import { useKessel, type Chain as ChainState } from "../lib/useKessel";
 
 const MAX_UINT = (1n << 256n) - 1n;
+
+/// v4 wraps a reverting hook in `WrappedError`, so the useful selector is
+/// buried inside the payload and wallets render the whole thing as noise.
+/// These are the refusals a trader can actually cause.
+const REVERTS: Record<string, string> = {
+  "1502f9a2": "Order exceeds the warehouse cap for that direction.",
+  cfcd02e3: "Order is below the minimum size.",
+  e4b1632c: "Slow orders need a minimum output above zero.",
+  "06250401": "Amount too large for the order's price encoding.",
+  "5f2f8b2e": "Slow lane is paused.",
+};
+
+function explain(message: string): string {
+  for (const [sel, text] of Object.entries(REVERTS)) {
+    if (message.toLowerCase().includes(sel)) return text;
+  }
+  const firstLine = message.split(String.fromCharCode(10))[0];
+  return firstLine.slice(0, 160);
+}
 const short = (a: string) => a.slice(0, 6) + "…" + a.slice(-4);
 const fmt = (v: bigint | undefined, dp = 4) =>
   v === undefined ? "—" : Number(formatUnits(v, 18)).toFixed(dp);
@@ -33,8 +52,7 @@ function useTx() {
 
 function TxNote({ tx }: { tx: ReturnType<typeof useTx> }) {
   if (tx.error) {
-    const m = tx.error.message.split("\n")[0];
-    return <div className="tx-note err-note">{m.slice(0, 160)}</div>;
+    return <div className="tx-note err-note">{explain(tx.error.message)}</div>;
   }
   if (tx.mining) {
     return (
@@ -230,11 +248,13 @@ function Swap({
   onDone,
   sqrtPriceX96,
   liquidity,
+  chain,
 }: {
   owner: Address;
   onDone: () => void;
   sqrtPriceX96?: bigint;
   liquidity?: bigint;
+  chain?: ChainState;
 }) {
   const tx = useTx();
   const [lane, setLane] = useState<"fast" | "slow">("fast");
@@ -247,8 +267,24 @@ function Swap({
     if (tx.isSuccess) onDone();
   }, [tx.isSuccess]);
 
+  const amt = (() => {
+    try {
+      return parseUnits(amount || "0", 18);
+    } catch {
+      return 0n;
+    }
+  })();
+
+  // The warehouse cap is per direction and counts input already escrowed, so
+  // headroom is the cap minus what is pending -- not the cap itself.
+  const cap = zeroForOne ? chain?.maxWarehouse0 : chain?.maxWarehouse1;
+  const used = zeroForOne ? chain?.warehoused0 : chain?.warehoused1;
+  const headroom = cap !== undefined && used !== undefined ? (cap > used ? cap - used : 0n) : undefined;
+  const overCap = lane === "slow" && headroom !== undefined && amt > headroom;
+  const underMin =
+    lane === "slow" && chain?.minOrderSize0 !== undefined && amt > 0n && amt < chain.minOrderSize0;
+
   const submit = () => {
-    const amt = parseUnits(amount || "0", 18);
     const hookData =
       lane === "fast" ? FAST_DATA : slowData(owner, parseUnits(minOut || "0", 18), Number(expiry));
 
@@ -328,6 +364,23 @@ function Swap({
             </span>
             <input value={expiry} onChange={(e) => setExpiry(e.target.value)} inputMode="numeric" />
           </label>
+          {headroom !== undefined && (
+            <p className="hint">
+              Warehouse headroom this direction: <strong>{fmt(headroom, 3)}</strong>. The cap
+              bounds how much un-settled input the pool will hold at once.
+            </p>
+          )}
+          {overCap && (
+            <div className="tx-note err-note">
+              Over the warehouse cap. Reduce to {fmt(headroom, 3)} or less, or wait for the
+              pending batch to settle.
+            </div>
+          )}
+          {underMin && (
+            <div className="tx-note err-note">
+              Below the minimum order size ({fmt(chain?.minOrderSize0, 4)}).
+            </div>
+          )}
           <p className="hint">
             Your input is escrowed now. You will not know the price until a later Fast swap
             settles the batch — that is what makes the fill unattackable.
@@ -335,7 +388,11 @@ function Swap({
         </>
       )}
 
-      <button className="pill wide" onClick={submit} disabled={tx.isPending || tx.mining}>
+      <button
+        className="pill wide"
+        onClick={submit}
+        disabled={tx.isPending || tx.mining || overCap || underMin || amt === 0n}
+      >
         {tx.isPending || tx.mining
           ? "Submitting…"
           : lane === "fast"
@@ -519,6 +576,7 @@ export default function AppPage({ onHome }: { onHome: () => void }) {
                 onDone={() => setTick((t) => t + 1)}
                 sqrtPriceX96={data?.sqrtPriceX96}
                 liquidity={data?.liquidity}
+                chain={data ?? undefined}
               />
               <Orders
                 owner={address!}

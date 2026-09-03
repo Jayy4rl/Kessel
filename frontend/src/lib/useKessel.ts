@@ -70,6 +70,10 @@ export type Chain = {
   nextOrderId: bigint;
   minSettleAge: number;
   warehoused0: bigint;
+  warehoused1: bigint;
+  maxWarehouse0: bigint;
+  maxWarehouse1: bigint;
+  minOrderSize0: bigint;
   lpClaimable0: bigint;
   lpClaimable1: bigint;
   forceSettleDue: boolean;
@@ -97,11 +101,14 @@ export function useKessel(pollMs = 12_000) {
 
         const [
           fBase, fSlow, k, currentEpoch, oldest, nextOrderId,
-          minSettleAge, warehoused0, lpc0, lpc1, due, block, pool,
+          minSettleAge, warehoused0, warehoused1, maxW0, maxW1, minSize0,
+          lpc0, lpc1, due, block, pool,
         ] = await Promise.all([
           call("fBase"), call("fSlow"), call("k"), call("currentEpoch"),
           call("oldestUnsettledEpoch"), call("nextOrderId"), call("minSettleAge"),
-          call("warehoused0"), call("lpClaimable0"), call("lpClaimable1"),
+          call("warehoused0"), call("warehoused1"),
+          call("maxWarehouse0"), call("maxWarehouse1"), call("minOrderSize0"),
+          call("lpClaimable0"), call("lpClaimable1"),
           call("forceSettleDue"), client.getBlockNumber(), readPool(),
         ]);
 
@@ -123,6 +130,10 @@ export function useKessel(pollMs = 12_000) {
           nextOrderId: BigInt(nextOrderId as number | bigint),
           minSettleAge: Number(minSettleAge),
           warehoused0: BigInt(warehoused0 as number | bigint),
+          warehoused1: BigInt(warehoused1 as number | bigint),
+          maxWarehouse0: BigInt(maxW0 as number | bigint),
+          maxWarehouse1: BigInt(maxW1 as number | bigint),
+          minOrderSize0: BigInt(minSize0 as number | bigint),
           lpClaimable0: BigInt(lpc0 as number | bigint),
           lpClaimable1: BigInt(lpc1 as number | bigint),
           forceSettleDue: Boolean(due),
