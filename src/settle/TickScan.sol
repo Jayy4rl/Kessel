@@ -7,34 +7,11 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
-/// @notice Tick-bitmap search for the bounds of the current constant-liquidity
-/// range.
-///
-/// @dev `internal`, so it inlines into `BatchSolver` — its only consumer, and
-/// itself a deployed library. Keeping it out of the hook matters for size:
-/// `BitMath` and `TickMath` both inline here.
 library TickScan {
-    /// @dev Words of tick bitmap to scan in each direction before giving up and
-    /// using the last word boundary reached. That boundary is always a *safe*
-    /// bound — no liquidity change can occur before it — so the budget trades
-    /// fill size for gas, never correctness.
-    ///
-    /// Scanning more than one word is not optional. A single-word search
-    /// returns the word's own edge when the word holds no initialised tick, and
-    /// at bit position 0 that edge IS the current price — a zero-width range.
-    /// Tick 0, the usual initialisation price, sits at exactly that position.
+    
     uint256 internal constant MAX_BITMAP_WORDS = 8;
 
-    /// @notice Bounds of the range over which active liquidity is constant.
-    ///
-    /// @dev Liquidity changes only at *initialised* ticks, so this searches the
-    /// tick bitmap rather than snapping to the next multiple of `spacing`. The
-    /// distinction is not cosmetic: most spacing multiples carry no position,
-    /// and clamping to them would force nearly every batch into a partial fill.
-    ///
-    /// When a word contains no initialised tick, its boundary is returned,
-    /// which is still a correct bound since no liquidity change can occur
-    /// before it.
+    
     function activeRangeTicks(
         IPoolManager poolManager,
         PoolId poolId,
@@ -48,17 +25,7 @@ library TickScan {
         upperTick = _scanUp(poolManager, poolId, compressed, spacing);
     }
 
-    /// @dev Cursor arithmetic is done in `int256`, not `int24`.
-    ///
-    /// A word step moves the cursor by up to 256 compressed ticks, and the
-    /// cursor is only converted back to a tick by multiplying by the spacing.
-    /// For a wide-spaced pool that product leaves `int24` range after a single
-    /// step off the end of the initialised ticks — `-257 * 32767` is already
-    /// past `int24` min — and the checked multiplication would then panic
-    /// *inside* settlement. On an immutable, pool-bound hook that is permanent:
-    /// every settlement for that pool reverts forever. Widening the cursor and
-    /// clamping at the end keeps the out-of-range case returning the tick
-    /// range's own boundary.
+  
     function _scanDown(
         IPoolManager poolManager,
         PoolId poolId,
@@ -76,7 +43,6 @@ library TickScan {
             if (masked != 0) {
                 return _clampTick((cursor - int256(uint256(bitPos - BitMath.mostSignificantBit(masked)))) * sp);
             }
-            // Step to the last compressed tick of the word below and continue.
             cursor = cursor - int256(uint256(bitPos)) - 1;
             if (cursor * sp <= TickMath.MIN_TICK) break;
         }
