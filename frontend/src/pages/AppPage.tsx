@@ -354,7 +354,7 @@ function Orders({ owner, nextOrderId, tick }: { owner: Address; nextOrderId: big
 
   useEffect(() => {
     let alive = true;
-    (async () => {
+    async function load() {
       const found: Row[] = [];
       for (const id of ids) {
         try {
@@ -377,9 +377,12 @@ function Orders({ owner, nextOrderId, tick }: { owner: Address; nextOrderId: big
         }
       }
       if (alive) setRows(found);
-    })();
+    }
+    load();
+    const t = setInterval(load, 4000);
     return () => {
       alive = false;
+      clearInterval(t);
     };
   }, [ids, owner, tick, tx.isSuccess]);
 
