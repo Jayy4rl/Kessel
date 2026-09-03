@@ -17,8 +17,25 @@ export const MIN_SQRT_PRICE_LIMIT = 4295128740n;
 export const MAX_SQRT_PRICE_LIMIT =
   1461446703485210103287273052203988822378723970341n;
 
-export const priceLimit = (zeroForOne: boolean) =>
-  zeroForOne ? MIN_SQRT_PRICE_LIMIT : MAX_SQRT_PRICE_LIMIT;
+/// A swap needs a price limit, and passing the extreme bound means "no limit
+/// at all" -- the swap will walk the curve as far as it can. That is how this
+/// pool's price was driven to MIN_TICK with a single oversized trade, leaving
+/// zero active liquidity behind. So bound it near the current price instead.
+///
+/// The bound is applied to the SQRT price, so a given bps here is roughly twice
+/// that in price terms. Falls back to the extreme only when the pool price is
+/// unreadable, which should not happen.
+export function priceLimit(zeroForOne: boolean, sqrtPriceX96?: bigint, slippageBps = 500n): bigint {
+  if (!sqrtPriceX96 || sqrtPriceX96 === 0n) {
+    return zeroForOne ? MIN_SQRT_PRICE_LIMIT : MAX_SQRT_PRICE_LIMIT;
+  }
+  const limit = zeroForOne
+    ? (sqrtPriceX96 * (10_000n - slippageBps)) / 10_000n
+    : (sqrtPriceX96 * (10_000n + slippageBps)) / 10_000n;
+
+  if (zeroForOne) return limit < MIN_SQRT_PRICE_LIMIT ? MIN_SQRT_PRICE_LIMIT : limit;
+  return limit > MAX_SQRT_PRICE_LIMIT ? MAX_SQRT_PRICE_LIMIT : limit;
+}
 
 /// `hookData` selects the lane. Empty bytes and an unrecognised byte both mean
 /// FAST, so an aggregator that knows nothing about this hook still trades.

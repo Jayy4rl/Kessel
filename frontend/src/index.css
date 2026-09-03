@@ -175,3 +175,5 @@ tbody tr:last-child td { border-bottom: 0; }
 .wallet-none a { font-size: 12px; }
 .connect-prompt .wallet-connect,
 .connect-prompt .wallet-err { position: static; width: auto; }
+
+.kv dd.bad { color: var(--coral); }

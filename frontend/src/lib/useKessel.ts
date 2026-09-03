@@ -1,8 +1,15 @@
 import { useEffect, useState } from "react";
-import { createPublicClient, http, type Address } from "viem";
+import {
+  createPublicClient,
+  encodeAbiParameters,
+  hexToBigInt,
+  http,
+  keccak256,
+  type Address,
+} from "viem";
 import { baseSepolia } from "viem/chains";
 import { kesselAbi } from "./abi";
-import { ADDRESSES, RPC_URL } from "./config";
+import { ADDRESSES, POOL_ID, RPC_URL } from "./config";
 
 export const client = createPublicClient({
   chain: baseSepolia,
@@ -10,6 +17,44 @@ export const client = createPublicClient({
 });
 
 const hook = { address: ADDRESSES.hook as Address, abi: kesselAbi } as const;
+
+const extsloadAbi = [
+  {
+    type: "function",
+    name: "extsload",
+    inputs: [{ type: "bytes32" }],
+    outputs: [{ type: "bytes32" }],
+    stateMutability: "view",
+  },
+] as const;
+
+/// v4 keeps every pool in one mapping at slot 6. `slot0` (sqrt price, tick) is
+/// the first word of that struct and `liquidity` is three along. Reading them
+/// directly avoids a periphery lens contract for two numbers.
+const POOL_BASE_SLOT = keccak256(
+  encodeAbiParameters([{ type: "bytes32" }, { type: "uint256" }], [POOL_ID as `0x${string}`, 6n]),
+);
+
+async function readPool() {
+  const read = (slot: `0x${string}`) =>
+    client.readContract({
+      address: ADDRESSES.poolManager as Address,
+      abi: extsloadAbi,
+      functionName: "extsload",
+      args: [slot],
+    });
+
+  const raw = hexToBigInt(await read(POOL_BASE_SLOT));
+  const sqrtPriceX96 = raw & ((1n << 160n) - 1n);
+  let tick = Number((raw >> 160n) & ((1n << 24n) - 1n));
+  if (tick >= 2 ** 23) tick -= 2 ** 24; // int24, stored two's complement
+
+  const liqSlot = ("0x" +
+    (hexToBigInt(POOL_BASE_SLOT) + 3n).toString(16).padStart(64, "0")) as `0x${string}`;
+  const liquidity = hexToBigInt(await read(liqSlot)) & ((1n << 128n) - 1n);
+
+  return { sqrtPriceX96, tick, liquidity };
+}
 
 export type Chain = {
   fBase: bigint;
@@ -25,6 +70,9 @@ export type Chain = {
   lpClaimable1: bigint;
   forceSettleDue: boolean;
   block: bigint;
+  sqrtPriceX96: bigint;
+  tick: number;
+  liquidity: bigint;
 };
 
 /// Polls the deployed hook. `stale` distinguishes "the chain says zero" from
@@ -45,12 +93,12 @@ export function useKessel(pollMs = 12_000) {
 
         const [
           fBase, fSlow, k, currentEpoch, oldest, nextOrderId,
-          minSettleAge, warehoused0, lpc0, lpc1, due, block,
+          minSettleAge, warehoused0, lpc0, lpc1, due, block, pool,
         ] = await Promise.all([
           call("fBase"), call("fSlow"), call("k"), call("currentEpoch"),
           call("oldestUnsettledEpoch"), call("nextOrderId"), call("minSettleAge"),
           call("warehoused0"), call("lpClaimable0"), call("lpClaimable1"),
-          call("forceSettleDue"), client.getBlockNumber(),
+          call("forceSettleDue"), client.getBlockNumber(), readPool(),
         ]);
 
         const pending = await call("orderCount", [Number(oldest)]);
@@ -59,8 +107,8 @@ export function useKessel(pollMs = 12_000) {
         // viem decodes integer types by width: anything <= 48 bits comes back
         // as a JS `number`, wider as a `bigint`. `fBase` and `fSlow` are uint24
         // and so arrive as numbers, which then cannot be mixed with the uint256
-        // `k` in the fee arithmetic. Normalising here keeps that decision in one
-        // place rather than at every call site.
+        // `k` in the fee arithmetic. Normalising here keeps that decision in
+        // one place rather than at every call site.
         setData({
           fBase: BigInt(fBase as number | bigint),
           fSlow: BigInt(fSlow as number | bigint),
@@ -75,6 +123,7 @@ export function useKessel(pollMs = 12_000) {
           lpClaimable1: BigInt(lpc1 as number | bigint),
           forceSettleDue: Boolean(due),
           block: BigInt(block as number | bigint),
+          ...(pool as Awaited<ReturnType<typeof readPool>>),
         });
         setError(null);
         setStale(false);

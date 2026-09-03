@@ -225,7 +225,17 @@ function Liquidity({ owner }: { owner: Address }) {
 /* swap                                                                */
 /* ------------------------------------------------------------------ */
 
-function Swap({ owner, onDone }: { owner: Address; onDone: () => void }) {
+function Swap({
+  owner,
+  onDone,
+  sqrtPriceX96,
+  liquidity,
+}: {
+  owner: Address;
+  onDone: () => void;
+  sqrtPriceX96?: bigint;
+  liquidity?: bigint;
+}) {
   const tx = useTx();
   const [lane, setLane] = useState<"fast" | "slow">("fast");
   const [zeroForOne, setZeroForOne] = useState(true);
@@ -248,7 +258,7 @@ function Swap({ owner, onDone }: { owner: Address; onDone: () => void }) {
       functionName: "swap",
       args: [
         POOL_KEY,
-        { zeroForOne, amountSpecified: -amt, sqrtPriceLimitX96: priceLimit(zeroForOne) },
+        { zeroForOne, amountSpecified: -amt, sqrtPriceLimitX96: priceLimit(zeroForOne, sqrtPriceX96) },
         TEST_SETTINGS,
         hookData,
       ],
@@ -278,6 +288,13 @@ function Swap({ owner, onDone }: { owner: Address; onDone: () => void }) {
           <span>batch · 0.05%</span>
         </button>
       </div>
+
+      {liquidity !== undefined && liquidity === 0n && (
+        <div className="tx-note err-note">
+          This pool has no active liquidity at the current price, so nothing can fill. Add
+          liquidity first — a slow order placed now will sit until it expires.
+        </div>
+      )}
 
       <Approvals owner={owner} spender={ADDRESSES.swapRouter as Address} label="Swap router" />
 
@@ -497,7 +514,12 @@ export default function AppPage({ onHome }: { onHome: () => void }) {
         ) : (
           <div className="a-grid">
             <div className="col">
-              <Swap owner={address!} onDone={() => setTick((t) => t + 1)} />
+              <Swap
+                owner={address!}
+                onDone={() => setTick((t) => t + 1)}
+                sqrtPriceX96={data?.sqrtPriceX96}
+                liquidity={data?.liquidity}
+              />
               <Orders
                 owner={address!}
                 nextOrderId={data?.nextOrderId ?? 1n}
@@ -528,6 +550,12 @@ export default function AppPage({ onHome }: { onHome: () => void }) {
                   <dd>{data ? (data.forceSettleDue ? "forceable now" : "waiting") : "—"}</dd>
                   <dt>Min age</dt>
                   <dd>{data ? data.minSettleAge + " blocks" : "—"}</dd>
+                  <dt>Active liquidity</dt>
+                  <dd className={data && data.liquidity === 0n ? "bad" : ""}>
+                    {data ? (data.liquidity === 0n ? "none in range" : fmt(data.liquidity, 2)) : "—"}
+                  </dd>
+                  <dt>Tick</dt>
+                  <dd className="mono">{data ? data.tick : "—"}</dd>
                 </dl>
                 <p className="hint">
                   A slow order settles when a later Fast swap carries it. Place one, then send a
