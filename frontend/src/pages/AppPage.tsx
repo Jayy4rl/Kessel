@@ -18,6 +18,28 @@ import { useKessel, type Chain as ChainState } from "../lib/useKessel";
 
 const MAX_UINT = (1n << 256n) - 1n;
 
+/// Explicit gas limits, roughly 3x measured cost.
+///
+/// Not an optimisation -- a reliability fix. When `eth_estimateGas` fails on
+/// the wallet's own RPC (which the dapp cannot influence), MetaMask falls back
+/// to the BLOCK gas limit, which on Base Sepolia is 1.2 billion, and then its
+/// own sanity check rejects that as "exceeds max transaction gas limit". The
+/// transaction was always fine; the estimate was not. Supplying a limit skips
+/// that path entirely. Unused gas is refunded, so headroom is free.
+///
+/// Measured: fast swap 145,878 · slow swap 300,061 · liquidity 171,748 ·
+/// approve 26,692 · mint 34,300. The fast-lane figure is for a swap that
+/// carries NO batch; one that settles up to MAX_ORDERS_PER_EPOCH does more
+/// work, which is what the larger allowance covers.
+const GAS = {
+  fastSwap: 1_500_000n,
+  slowSwap: 600_000n,
+  liquidity: 600_000n,
+  approve: 120_000n,
+  mint: 120_000n,
+  redeem: 500_000n,
+} as const;
+
 /// v4 wraps a reverting hook in `WrappedError`, so the useful selector is
 /// buried inside the payload and wallets render the whole thing as noise.
 /// These are the refusals a trader can actually cause.
@@ -110,6 +132,7 @@ function Faucet({ owner }: { owner: Address }) {
       abi: erc20Abi,
       functionName: "mint",
       args: [owner, parseUnits("1000", 18)],
+      gas: GAS.mint,
     });
 
   return (
@@ -175,6 +198,7 @@ function Approvals({ owner, spender, label }: { owner: Address; spender: Address
       abi: erc20Abi,
       functionName: "approve",
       args: [spender, MAX_UINT],
+      gas: GAS.approve,
     });
 
   return (
@@ -218,6 +242,7 @@ function Liquidity({ owner }: { owner: Address }) {
         },
         "0x",
       ],
+      gas: GAS.liquidity,
     });
 
   return (
@@ -298,6 +323,7 @@ function Swap({
         TEST_SETTINGS,
         hookData,
       ],
+      gas: lane === "fast" ? GAS.fastSwap : GAS.slowSwap,
     });
   };
 
@@ -508,6 +534,7 @@ function Orders({ owner, nextOrderId, tick }: { owner: Address; nextOrderId: big
                         abi: kesselAbi,
                         functionName: "redeem",
                         args: [r.id],
+                        gas: GAS.redeem,
                       })
                     }
                   >
