@@ -1,12 +1,15 @@
 import { Component, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { WagmiProvider } from "wagmi";
 import "./index.css";
 import App from "./App";
+import { wagmiConfig } from "./lib/wagmi";
 
 /// A thrown render is otherwise a blank page with the reason only in the
-/// console. This is worth having beyond debugging: the dashboard is meant to be
-/// opened by people who did not build it, and "nothing happened" is the least
-/// useful thing it could tell them.
+/// console. Worth having beyond debugging: this is meant to be opened by people
+/// who did not build it, and "nothing happened" is the least useful thing it
+/// could tell them.
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
 
@@ -20,7 +23,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     return (
       <div style={{ padding: 28, fontFamily: "ui-monospace, Menlo, Consolas, monospace" }}>
         <h1 style={{ fontSize: 18, color: "#e8563f", margin: "0 0 10px" }}>
-          The dashboard failed to render
+          The app failed to render
         </h1>
         <pre
           style={{
@@ -43,10 +46,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+const queryClient = new QueryClient();
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
-      <App />
+      <WagmiProvider config={wagmiConfig}>
+        <QueryClientProvider client={queryClient}>
+          <App />
+        </QueryClientProvider>
+      </WagmiProvider>
     </ErrorBoundary>
   </StrictMode>,
 );

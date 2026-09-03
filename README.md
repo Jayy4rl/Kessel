@@ -19,7 +19,7 @@ Letting traders self-select by urgency is a screening mechanism: it prices **imm
 
 ```
 contracts/   Foundry project: the hook, its libraries, tests, deploy scripts
-frontend/    Vite + React dashboard, reads the deployed hook live
+frontend/    Vite + React dApp: landing page, wallet connect, both lanes
 docs/        PRD.md, the canonical protocol specification
 ```
 
@@ -36,11 +36,19 @@ Expect `261 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves 
 
 Dependencies nest — `v4-core` and `permit2` are submodules of `v4-periphery` — so `--recursive` is required, not optional. Every `forge` command runs from `contracts/`.
 
-The dashboard reads the live deployment on Base Sepolia over a public RPC, so it
-needs no keys and no local chain. Fees, epoch, block and pending-order counts
-come from the hook itself; the fee curve is computed from the same formula the
-contract runs, so it is the fee the pool would actually charge rather than an
-illustration of one.
+The frontend talks to the live Base Sepolia deployment. A landing page explains
+the mechanism; **Launch app** opens the trading view, which needs an injected
+wallet on Base Sepolia and nothing else — the pool's tokens are mocks with a
+public `mint`, so anyone can fund themselves and trade.
+
+From there you can mint test tokens, approve the routers, add liquidity, swap
+through either lane, and redeem a settled slow order. To see the mechanism
+work end to end: place a slow order, wait `minSettleAge` blocks, then send a
+fast swap — that swap carries the batch, and the order becomes redeemable.
+
+Live pool state (fees, epoch, block, pending orders) is read from the hook. The
+fee curve is computed from the same formula the contract runs, so it is the fee
+the pool would actually charge rather than an illustration of one.
 
 ## Deployed — Base Sepolia (84532)
 
