@@ -53,23 +53,28 @@ export function useKessel(pollMs = 12_000) {
           call("forceSettleDue"), client.getBlockNumber(),
         ]);
 
-        const pending = (await call("orderCount", [Number(oldest)])) as bigint;
+        const pending = await call("orderCount", [Number(oldest)]);
         if (!alive) return;
 
+        // viem decodes integer types by width: anything <= 48 bits comes back
+        // as a JS `number`, wider as a `bigint`. `fBase` and `fSlow` are uint24
+        // and so arrive as numbers, which then cannot be mixed with the uint256
+        // `k` in the fee arithmetic. Normalising here keeps that decision in one
+        // place rather than at every call site.
         setData({
-          fBase: fBase as bigint,
-          fSlow: fSlow as bigint,
-          k: k as bigint,
+          fBase: BigInt(fBase as number | bigint),
+          fSlow: BigInt(fSlow as number | bigint),
+          k: BigInt(k as number | bigint),
           currentEpoch: Number(currentEpoch),
           oldestUnsettledEpoch: Number(oldest),
-          pending,
-          nextOrderId: nextOrderId as bigint,
+          pending: BigInt(pending as number | bigint),
+          nextOrderId: BigInt(nextOrderId as number | bigint),
           minSettleAge: Number(minSettleAge),
-          warehoused0: warehoused0 as bigint,
-          lpClaimable0: lpc0 as bigint,
-          lpClaimable1: lpc1 as bigint,
-          forceSettleDue: due as boolean,
-          block: block as bigint,
+          warehoused0: BigInt(warehoused0 as number | bigint),
+          lpClaimable0: BigInt(lpc0 as number | bigint),
+          lpClaimable1: BigInt(lpc1 as number | bigint),
+          forceSettleDue: Boolean(due),
+          block: BigInt(block as number | bigint),
         });
         setError(null);
         setStale(false);
