@@ -1,7 +1,8 @@
-import { createConfig, http } from "wagmi";
+import { fallback, http } from "viem";
+import { createConfig } from "wagmi";
 import { baseSepolia } from "wagmi/chains";
 import { injected } from "wagmi/connectors";
-import { RPC_URL } from "./config";
+import { RPC_URLS } from "./config";
 
 export const wagmiConfig = createConfig({
   chains: [baseSepolia],
@@ -10,7 +11,15 @@ export const wagmiConfig = createConfig({
   // as the fallback for extensions that only expose `window.ethereum`.
   multiInjectedProviderDiscovery: true,
   connectors: [injected({ shimDisconnect: true })],
-  transports: { [baseSepolia.id]: http(RPC_URL) },
+  // Reads fall through to the next endpoint rather than surfacing one host's
+  // outage as a broken app. NOTE: this does not cover sending transactions --
+  // those go out through the wallet's own RPC, not this one.
+  transports: {
+    [baseSepolia.id]: fallback(
+      RPC_URLS.map((url) => http(url, { retryCount: 2 })),
+      { rank: false },
+    ),
+  },
 });
 
 declare module "wagmi" {

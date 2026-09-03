@@ -1,6 +1,15 @@
 // Deployed 2026-09-03. See ../../../contracts and the root README.
 export const CHAIN_ID = 84532;
-export const RPC_URL = "https://sepolia.base.org";
+/// Public endpoints, tried in order. The first has been unreliable in
+/// practice -- returning HTTP 500 on perfectly valid calls -- and a single
+/// endpoint means one flaky host looks like a broken app.
+export const RPC_URLS = [
+  "https://sepolia.base.org",
+  "https://base-sepolia-rpc.publicnode.com",
+  "https://base-sepolia.drpc.org",
+] as const;
+
+export const RPC_URL = RPC_URLS[0];
 export const EXPLORER = "https://sepolia.basescan.org";
 
 export const ADDRESSES = {

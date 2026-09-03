@@ -3,17 +3,21 @@ import {
   createPublicClient,
   encodeAbiParameters,
   hexToBigInt,
+  fallback,
   http,
   keccak256,
   type Address,
 } from "viem";
 import { baseSepolia } from "viem/chains";
 import { kesselAbi } from "./abi";
-import { ADDRESSES, POOL_ID, RPC_URL } from "./config";
+import { ADDRESSES, POOL_ID, RPC_URLS } from "./config";
 
 export const client = createPublicClient({
   chain: baseSepolia,
-  transport: http(RPC_URL),
+  transport: fallback(
+    RPC_URLS.map((url) => http(url, { retryCount: 2 })),
+    { rank: false },
+  ),
 });
 
 const hook = { address: ADDRESSES.hook as Address, abi: kesselAbi } as const;
