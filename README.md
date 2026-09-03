@@ -52,29 +52,45 @@ the pool would actually charge rather than an illustration of one.
 
 ## Deployed — Base Sepolia (84532)
 
-Live as of 2026-09-03. This is a testnet deployment with mock tokens; nothing
-here is a production pool.
+Live as of 2026-09-03. Testnet, mock tokens; nothing here is a production pool.
 
 | Contract | Address |
 |---|---|
-| `KesselHook` | [`0x813E0c51907e09E0e447475947a819D0c66d00C8`](https://sepolia.basescan.org/address/0x813E0c51907e09E0e447475947a819D0c66d00C8) |
+| `KesselHook` | [`0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8`](https://sepolia.basescan.org/address/0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8) |
 | `BatchSolver` (linked library) | [`0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81`](https://sepolia.basescan.org/address/0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81) |
-| Test token A (`currency0`) | [`0x56b7936a7f0C71FC95b302271123F2cC5AF70596`](https://sepolia.basescan.org/address/0x56b7936a7f0C71FC95b302271123F2cC5AF70596) |
-| Test token B (`currency1`) | [`0x750feAb85382bA28B45cd54443146E53D40a529A`](https://sepolia.basescan.org/address/0x750feAb85382bA28B45cd54443146E53D40a529A) |
+| Test token A (`currency0`) | [`0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf`](https://sepolia.basescan.org/address/0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf) |
+| Test token B (`currency1`) | [`0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F`](https://sepolia.basescan.org/address/0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F) |
 | v4 `PoolManager` | [`0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`](https://sepolia.basescan.org/address/0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408) |
 
-- **Pool ID** `0x5c38804e9f39fa6324ba32dce4d68315d5fd204333294e92c19ee29a0af16f28`
-- **CREATE2 salt** `18109`, mined through the canonical factory `0x4e59b448…B4956C`
+- **Pool ID** `0x9be8cc8e62ffa0921506a9e4ac87fa0b7f84aede541b824d9da2abd6e3496168`
+- **CREATE2 salt** `1871`, mined through the canonical factory `0x4e59b448…B4956C`
 - **Runtime size** 22,515 bytes, 2,061 under the EIP-170 limit
 - **Governance** `0xE8E0Ae7555f1a9a0479b97a86ACca2Dc81bf9922`
+- **Seeded** 500 ether of liquidity across ticks −60000 → 60000
 
-The address ends in `0x00C8` — the low 14 bits are v4's permission bitmap, so
-`0xC8` *is* `beforeSwap | afterSwap | beforeSwapReturnDelta`. Anything else at
-this address would be a different hook. Verify it yourself:
+The address ends in `0x80C8` — the low 14 bits are v4's permission bitmap, so
+`0xC8` *is* `beforeSwap | afterSwap | beforeSwapReturnDelta`. Verify it:
 
 ```bash
-cast call 0x813E0c51907e09E0e447475947a819D0c66d00C8 'fBase()(uint24)'   --rpc-url https://sepolia.base.org        # 3000
+cast call 0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8 'fBase()(uint24)'   --rpc-url https://sepolia.base.org        # 3000
 ```
+
+### The safety parameters are set on this deployment
+
+`maxWarehouse` is **50 tokens per direction** and `minOrderSize` is **0.001**.
+Both default to no-ops (`type(uint128).max` and `0`) and must be set explicitly
+for the pair, which the first deployment did not do — so a slow order orders of
+magnitude larger than the pool was accepted rather than rejected. The warehouse
+cap is the protocol's own answer to that and only works when it is configured.
+
+### A previous deployment was destroyed, deliberately kept as a record
+
+The first hook (`0x813E…00C8`) still exists with its pool at `MIN_TICK` and
+zero active liquidity. A single oversized swap walked the price through the
+whole liquidity range, because the frontend passed `MIN_SQRT_PRICE` as the
+swap's price limit — which is not a limit but a licence to move the price as
+far as the trade reaches. The contract behaved correctly throughout: both
+fillable batches settled, and `SettlementSkipped` never fired.
 
 ### Redeploying
 

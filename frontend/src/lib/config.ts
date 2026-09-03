@@ -4,19 +4,19 @@ export const RPC_URL = "https://sepolia.base.org";
 export const EXPLORER = "https://sepolia.basescan.org";
 
 export const ADDRESSES = {
-  hook: "0x813E0c51907e09E0e447475947a819D0c66d00C8",
+  hook: "0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8",
   batchSolver: "0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81",
-  currency0: "0x56b7936a7f0C71FC95b302271123F2cC5AF70596",
-  currency1: "0x750feAb85382bA28B45cd54443146E53D40a529A",
+  currency0: "0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf",
+  currency1: "0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F",
   poolManager: "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408",
   // v4 requires every pool interaction to come through a contract that holds
   // the singleton's lock. These are the test routers deployed alongside.
-  swapRouter: "0xa5C0faa78B965d61A62DBb61DDdF5DF076617A2e",
-  lpRouter: "0xce6A7D17ccC39013B764CAd2cb84dc617C5104f5",
+  swapRouter: "0xff870819bC7Cd14dEFbd32CdD076AcEfF6521D9e",
+  lpRouter: "0x7CD076795953e44456dD3E8569e43C34f96Bdb09",
 } as const;
 
 export const POOL_ID =
-  "0x5c38804e9f39fa6324ba32dce4d68315d5fd204333294e92c19ee29a0af16f28";
+  "0x9be8cc8e62ffa0921506a9e4ac87fa0b7f84aede541b824d9da2abd6e3496168";
 
 /// Measured on-chain, same 0.01 input through each lane. See the README.
-export const MEASURED = { fastOut: 9_969_006_090_092_817n, slowOut: 9_991_809_485_447_428n };
+export const MEASURED = { fastOut: 9_969_801_202_164_028n, slowOut: 9_994_361_770_855_610n };

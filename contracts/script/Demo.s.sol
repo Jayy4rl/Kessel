@@ -66,7 +66,7 @@ contract DemoSeed is DemoBase {
 
         lp.modifyLiquidity(
             key(),
-            ModifyLiquidityParams({tickLower: -6000, tickUpper: 6000, liquidityDelta: 100 ether, salt: bytes32(0)}),
+            ModifyLiquidityParams({tickLower: -60000, tickUpper: 60000, liquidityDelta: 500 ether, salt: bytes32(0)}),
             ""
         );
 
