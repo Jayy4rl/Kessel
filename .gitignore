@@ -21,3 +21,8 @@ coverage/
 
 # Node (only if a dashboard/tooling package is added later)
 node_modules/
+
+# Frontend
+dist/
+.vite/
+*.local

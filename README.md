@@ -15,17 +15,32 @@ Letting traders self-select by urgency is a screening mechanism: it prices **imm
 
 `docs/PRD.md` is the canonical specification and the document to review against.
 
+## Layout
+
+```
+contracts/   Foundry project: the hook, its libraries, tests, deploy scripts
+frontend/    Vite + React dashboard, reads the deployed hook live
+docs/        PRD.md, the canonical protocol specification
+```
+
 ## Quick start
 
 ```bash
 git submodule update --init --recursive
-forge build
-forge test
+
+cd contracts && forge test      # 261 passed, 2 skipped
+cd ../frontend && npm install && npm run dev
 ```
 
 Expect `261 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves of the A3 fork test and are explained below; set `BASE_RPC_URL` to run them and the count becomes 263 passed, 0 skipped. Nothing else requires configuration.
 
-Dependencies nest — `v4-core` and `permit2` are submodules of `v4-periphery` — so `--recursive` is required, not optional.
+Dependencies nest — `v4-core` and `permit2` are submodules of `v4-periphery` — so `--recursive` is required, not optional. Every `forge` command runs from `contracts/`.
+
+The dashboard reads the live deployment on Base Sepolia over a public RPC, so it
+needs no keys and no local chain. Fees, epoch, block and pending-order counts
+come from the hook itself; the fee curve is computed from the same formula the
+contract runs, so it is the fee the pool would actually charge rather than an
+illustration of one.
 
 ## Deployed — Base Sepolia (84532)
 
@@ -69,7 +84,7 @@ Fast swap, and a redeem.
 ## Architecture
 
 ```
-src/
+contracts/src/
   KesselHook.sol        All state. Implements beforeSwap / afterSwap /
                         unlockCallback, and owns every stateful decision:
                         lane routing, Slow-Lane intake and custody, the order

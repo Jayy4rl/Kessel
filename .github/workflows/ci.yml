@@ -12,6 +12,9 @@ jobs:
   test:
     name: Build and test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +35,9 @@ jobs:
   build-optimized:
     name: Build with production settings
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +55,9 @@ jobs:
   slither:
     name: Slither
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
     # Kessel holds the `beforeSwapReturnDelta` permission, which is the highest
     # risk surface in v4. Static analysis is not optional here.
     steps:
@@ -62,5 +71,6 @@ jobs:
       - name: Run Slither
         uses: crytic/slither-action@v0.4.0
         with:
+          target: contracts
           fail-on: medium
-          slither-config: slither.config.json
+          slither-config: contracts/slither.config.json
