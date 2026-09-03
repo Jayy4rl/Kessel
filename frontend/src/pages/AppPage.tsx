@@ -2,14 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { formatUnits, parseUnits, type Address } from "viem";
 import {
   useAccount,
-  useConnect,
-  useDisconnect,
   useReadContract,
-  useSwitchChain,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
 import { readContract } from "wagmi/actions";
+import Wallet from "../components/Wallet";
 import { kesselAbi } from "../lib/abi";
 import { ADDRESSES, CHAIN_ID, EXPLORER } from "../lib/config";
 import { asPercent } from "../lib/fee";
@@ -22,46 +20,6 @@ const MAX_UINT = (1n << 256n) - 1n;
 const short = (a: string) => a.slice(0, 6) + "…" + a.slice(-4);
 const fmt = (v: bigint | undefined, dp = 4) =>
   v === undefined ? "—" : Number(formatUnits(v, 18)).toFixed(dp);
-
-/* ------------------------------------------------------------------ */
-/* wallet                                                              */
-/* ------------------------------------------------------------------ */
-
-function Wallet() {
-  const { address, isConnected, chainId } = useAccount();
-  const { connect, connectors, isPending } = useConnect();
-  const { disconnect } = useDisconnect();
-  const { switchChain } = useSwitchChain();
-
-  if (!isConnected) {
-    const injected = connectors[0];
-    return (
-      <button className="pill" disabled={isPending} onClick={() => connect({ connector: injected })}>
-        {isPending ? "Connecting…" : "Connect wallet"}
-      </button>
-    );
-  }
-
-  if (chainId !== CHAIN_ID) {
-    return (
-      <button className="pill warn" onClick={() => switchChain({ chainId: CHAIN_ID })}>
-        Switch to Base Sepolia
-      </button>
-    );
-  }
-
-  return (
-    <div className="wallet-chip">
-      <span className="live">
-        <b />
-        {short(address!)}
-      </span>
-      <button className="ghost-btn sm" onClick={() => disconnect()}>
-        Disconnect
-      </button>
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /* shared tx button                                                    */
