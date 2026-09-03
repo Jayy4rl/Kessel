@@ -54,6 +54,9 @@ fail_on_revert = false
 # values after mining.
 # ---------------------------------------------------------------------------
 [profile.optimized]
+# Deployed BatchSolver. The hook address is CREATE2-mined over creation
+# bytecode containing this address, so it must be fixed before mining.
+libraries = ["src/settle/BatchSolver.sol:BatchSolver:0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81"]
 via_ir = true
 optimizer = true
 # Tuned for SIZE, not for runtime gas. `KesselHook` is close to EIP-170's

@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {KesselErrors, Lane} from "../KesselTypes.sol";
 
-
 library LaneCodec {
     uint256 internal constant SLOW_DATA_LENGTH = 1 + 32 * 3;
 
@@ -19,7 +18,6 @@ library LaneCodec {
             if (hookData.length != SLOW_DATA_LENGTH) revert KesselErrors.MalformedSlowOrder();
             (trader, minOut, expiryEpochs) = abi.decode(hookData[1:], (address, uint128, uint32));
 
-           
             if (trader == address(0)) trader = sender;
 
             return (Lane.SLOW, trader, minOut, expiryEpochs);
@@ -28,7 +26,6 @@ library LaneCodec {
         return (Lane.FAST, address(0), 0, 0);
     }
 
-    
     function encodeFast() internal pure returns (bytes memory) {
         return abi.encodePacked(uint8(Lane.FAST));
     }

@@ -11,7 +11,6 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Clearing} from "./Clearing.sol";
 import {TickScan} from "./TickScan.sol";
 
-
 library BatchSolver {
     using StateLibrary for IPoolManager;
 
@@ -19,7 +18,6 @@ library BatchSolver {
     uint256 internal constant FEE_DENOMINATOR = 1_000_000;
     uint256 internal constant BPS_DENOMINATOR = 10_000;
 
-    
     uint256 internal constant MAX_CLEARING_RANGES = 4;
 
     struct Params {
@@ -30,7 +28,6 @@ library BatchSolver {
         uint16 residualCapBps;
     }
 
-    
     struct Walk {
         uint160 sqrtPriceX96;
         int24 tick;
@@ -40,7 +37,6 @@ library BatchSolver {
         uint256 capBudget;
     }
 
-    
     function solveMultiRange(
         Params memory p,
         uint256 net0,
@@ -52,7 +48,6 @@ library BatchSolver {
         w.rem0 = net0;
         w.rem1 = net1;
 
-       
         {
             uint256 spotX96 = FullMath.mulDiv(w.sqrtPriceX96, w.sqrtPriceX96, Q96);
             bool residualZeroForOne = net1 < FullMath.mulDiv(net0, spotX96, Q96);
@@ -75,7 +70,6 @@ library BatchSolver {
                 w.rem1
             );
 
-           
             if (!seg.feasible) break;
 
             out.feasible = true;
@@ -85,7 +79,6 @@ library BatchSolver {
             out.residualOut += seg.residualOut;
             out.clamped = seg.clamped;
 
-        
             if (!seg.clamped) break;
 
             if (seg.residualIn == 0 || seg.residualOut == 0) break;
@@ -106,7 +99,6 @@ library BatchSolver {
         if (out.priceX96 == 0) out.feasible = false;
     }
 
-    
     function _advance(
         Walk memory w,
         Clearing.Solution memory seg
@@ -114,7 +106,7 @@ library BatchSolver {
         uint256 lambda = seg.zeroForOne
             ? Clearing.fillRatio(w.rem0, w.rem1, seg.residualIn, seg.residualOut)
             : Clearing.fillRatio(w.rem1, w.rem0, seg.residualIn, seg.residualOut);
-       
+
         if (lambda == 0 || lambda >= Q96) return false;
 
         w.rem0 -= FullMath.mulDiv(w.rem0, lambda, Q96);
@@ -122,7 +114,6 @@ library BatchSolver {
         return !(w.rem0 == 0 && w.rem1 == 0);
     }
 
-    
     function _cross(
         Params memory p,
         uint128 liquidity,
@@ -134,7 +125,6 @@ library BatchSolver {
         return (LiquidityMath.addDelta(liquidity, liquidityNet), zeroForOne ? crossed - 1 : crossed);
     }
 
-    
     function _residualCap(
         Params memory p,
         uint160 sqrtPriceX96,
@@ -148,17 +138,14 @@ library BatchSolver {
 
         uint256 cap = FullMath.mulDiv(reserve, uint256(p.fBase) * p.residualCapBps, FEE_DENOMINATOR * BPS_DENOMINATOR);
 
-        
         return cap == 0 ? 1 : cap;
     }
 
-    
     function _predictedPrice(
         Clearing.Solution memory out,
         uint256 net0,
         uint256 net1
     ) private pure returns (uint160) {
-      
         if (out.residualIn == 0) {
             if (net0 == 0) return 0;
             return _toUint160(FullMath.mulDiv(net1, Q96, net0));

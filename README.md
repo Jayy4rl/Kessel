@@ -11,7 +11,7 @@ Letting traders self-select by urgency is a screening mechanism: it prices **imm
 
 **Implemented and tested; not reviewed by a human.**
 
-`src/` holds `KesselHook.sol` plus four libraries. **258 tests pass** on both compiler pipelines, including all twelve protocol invariants as real stateful assertions (256 runs × 16,384 calls, zero reverts). Two of them need a Base RPC endpoint and skip without one — see [Testing](#testing).
+`src/` holds `KesselHook.sol` plus four libraries. **261 tests pass** on both compiler pipelines, including all twelve protocol invariants as real stateful assertions (256 runs × 16,384 calls, zero reverts). Two of them need a Base RPC endpoint and skip without one — see [Testing](#testing).
 
 `docs/PRD.md` is the canonical specification and the document to review against.
 
@@ -23,9 +23,48 @@ forge build
 forge test
 ```
 
-Expect `258 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves of the A3 fork test and are explained below; set `BASE_RPC_URL` to run them and the count becomes 258 passed, 0 skipped. Nothing else requires configuration.
+Expect `261 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves of the A3 fork test and are explained below; set `BASE_RPC_URL` to run them and the count becomes 263 passed, 0 skipped. Nothing else requires configuration.
 
 Dependencies nest — `v4-core` and `permit2` are submodules of `v4-periphery` — so `--recursive` is required, not optional.
+
+## Deployed — Base Sepolia (84532)
+
+Live as of 2026-09-03. This is a testnet deployment with mock tokens; nothing
+here is a production pool.
+
+| Contract | Address |
+|---|---|
+| `KesselHook` | [`0x813E0c51907e09E0e447475947a819D0c66d00C8`](https://sepolia.basescan.org/address/0x813E0c51907e09E0e447475947a819D0c66d00C8) |
+| `BatchSolver` (linked library) | [`0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81`](https://sepolia.basescan.org/address/0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81) |
+| Test token A (`currency0`) | [`0x56b7936a7f0C71FC95b302271123F2cC5AF70596`](https://sepolia.basescan.org/address/0x56b7936a7f0C71FC95b302271123F2cC5AF70596) |
+| Test token B (`currency1`) | [`0x750feAb85382bA28B45cd54443146E53D40a529A`](https://sepolia.basescan.org/address/0x750feAb85382bA28B45cd54443146E53D40a529A) |
+| v4 `PoolManager` | [`0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`](https://sepolia.basescan.org/address/0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408) |
+
+- **Pool ID** `0x5c38804e9f39fa6324ba32dce4d68315d5fd204333294e92c19ee29a0af16f28`
+- **CREATE2 salt** `18109`, mined through the canonical factory `0x4e59b448…B4956C`
+- **Runtime size** 22,515 bytes, 2,061 under the EIP-170 limit
+- **Governance** `0xE8E0Ae7555f1a9a0479b97a86ACca2Dc81bf9922`
+
+The address ends in `0x00C8` — the low 14 bits are v4's permission bitmap, so
+`0xC8` *is* `beforeSwap | afterSwap | beforeSwapReturnDelta`. Anything else at
+this address would be a different hook. Verify it yourself:
+
+```bash
+cast call 0x813E0c51907e09E0e447475947a819D0c66d00C8 'fBase()(uint24)'   --rpc-url https://sepolia.base.org        # 3000
+```
+
+### Redeploying
+
+`script/Deploy.s.sol` runs in phases, and the order is not optional: the hook's
+creation bytecode embeds `BatchSolver`'s address, and the hook address is mined
+over that bytecode. Deploy the library first, pin it in **both** `foundry.toml`
+(`libraries` under `[profile.optimized]`) and `BATCH_SOLVER`, recompile, then
+mine and deploy. Both phases need `FOUNDRY_PROFILE=optimized` — the dev profile
+compiles the hook over the size limit and the deployment simply fails.
+
+`script/Demo.s.sol` then seeds liquidity and runs the loop end to end: a
+Fast-Lane swap, a Slow-Lane order, a piggyback settlement carried by a later
+Fast swap, and a redeem.
 
 ## Architecture
 

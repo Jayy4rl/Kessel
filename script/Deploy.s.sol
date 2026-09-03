@@ -109,9 +109,16 @@ contract DeployKessel is Script {
 
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
 
-        hook = new KesselHook{salt: salt}(
-            poolManager, Currency.wrap(currency0), Currency.wrap(currency1), tickSpacing, governance, gasTokenSide
-        );
+        // Deploy THROUGH the factory rather than with a salted `new`. A salted
+        // `new` is deployed by whichever contract executes it, which under
+        // `forge script` is the script itself -- a different deployer from the
+        // one the address was mined against, so the addresses cannot agree and
+        // the constructor's own permission check rejects the result.
+        bytes memory initCode = abi.encodePacked(type(KesselHook).creationCode, args);
+        (bool ok, bytes memory ret) = CREATE2_DEPLOYER.call(abi.encodePacked(salt, initCode));
+        require(ok, "CREATE2 deployment failed");
+
+        hook = KesselHook(address(uint160(bytes20(ret))));
         require(address(hook) == expected, "mined address did not match deployment");
 
         PoolKey memory key = PoolKey({
@@ -227,8 +234,7 @@ contract DeployTestTokens is Script {
         b.mint(deployer, 1_000_000 ether);
         vm.stopBroadcast();
 
-        (token0, token1) =
-            address(a) < address(b) ? (address(a), address(b)) : (address(b), address(a));
+        (token0, token1) = address(a) < address(b) ? (address(a), address(b)) : (address(b), address(a));
 
         console2.log("minted 1,000,000 of each to", deployer);
         console2.log("");

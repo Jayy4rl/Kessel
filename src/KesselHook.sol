@@ -38,7 +38,7 @@ contract KesselHook is IUnlockCallback {
 
     uint24 internal constant F_BASE_MIN = 100; // 1 bp
     uint24 internal constant F_BASE_MAX = 100_000; // 10%
-    
+
     uint24 internal constant MAX_FAST_FEE = 50_000; // 5%
     uint256 internal constant K_MIN = 0;
     uint256 internal constant K_MAX = 100_000; // 1 gwei => +10%
@@ -55,34 +55,29 @@ contract KesselHook is IUnlockCallback {
     uint32 internal constant MAX_DELAY_MIN = 2;
     uint32 internal constant MAX_DELAY_MAX = 100_000;
     uint32 internal constant MAX_EXPIRY_EPOCHS = 256;
-   
+
     uint32 internal constant EXPIRY_BLOCK_FLOOR_MAX = 7_200;
     uint16 internal constant EXPIRY_FORFEIT_BPS_MAX = 100; // 1%
 
- 
     uint256 internal constant MAX_ORDERS_PER_EPOCH = 32;
-    
+
     uint256 internal constant MAX_CLEARING_ROUNDS = 4;
 
-   
     uint16 internal constant RESIDUAL_CAP_BPS_MIN = 500; // 5% of break-even
     uint16 internal constant RESIDUAL_CAP_BPS_MAX = 10_000; // 100% = break-even
-    
-    uint256 internal constant I4_TOLERANCE_PPM = 100; // 0.01%
-    uint256 internal constant I4_DUST_FLOOR = 1e6;
 
-    
-    uint256 internal constant I8_TOLERANCE_PPM = 1; // 0.0001%
+    uint256 internal constant UNIFORM_PRICE_TOLERANCE_PPM = 100; // 0.01%
+    uint256 internal constant UNIFORM_PRICE_DUST_FLOOR = 1e6;
+
+    uint256 internal constant LIMIT_PRICE_TOLERANCE_PPM = 1; // 0.0001%
 
     IPoolManager public immutable poolManager;
 
-    PoolKey internal immutablePoolKeyStorage;
     PoolId public immutable poolId;
     Currency public immutable currency0;
     Currency public immutable currency1;
     int24 public immutable tickSpacing;
 
-    
     uint8 internal immutable gasTokenSide;
 
     address public governance;
@@ -91,7 +86,7 @@ contract KesselHook is IUnlockCallback {
     uint24 public fBase = 3_000; // 0.30%
     uint24 public fSlow = 500; // 0.05% — must stay strictly below fBase
     uint256 public k = 500; // rate form: 1 gwei => +5 bp
-   
+
     uint256 public kGas = 150_000;
 
     uint32 public minSettleAge = 2; // blocks; guards settlement-time pricing
@@ -100,23 +95,19 @@ contract KesselHook is IUnlockCallback {
     uint32 internal minForceSettleOrders = 2; // anti-grief size floor for forced settlement
     uint16 public expiryForfeitBps = 10; // 0.10%
 
-   
     uint16 internal residualCapBps = 5_000;
 
-    
     uint128 public maxWarehouse0 = type(uint128).max;
     uint128 public maxWarehouse1 = type(uint128).max;
 
-   
     uint128 public minOrderSize0;
     uint128 public minOrderSize1;
 
-    
     uint256 public nextOrderId = 1;
     mapping(uint256 orderId => Order) public orders;
 
     uint32 public currentEpoch = 1;
-    
+
     uint32 public oldestUnsettledEpoch = 1;
 
     mapping(uint32 epoch => Epoch) public epochs;
@@ -125,11 +116,9 @@ contract KesselHook is IUnlockCallback {
     uint128 public warehoused0;
     uint128 public warehoused1;
 
-   
     uint256 public lpClaimable0;
     uint256 public lpClaimable1;
 
-    
     bool private _settling;
 
     enum UnlockAction {
@@ -149,7 +138,6 @@ contract KesselHook is IUnlockCallback {
         _;
     }
 
-   
     constructor(
         IPoolManager _poolManager,
         Currency _currency0,
@@ -164,7 +152,7 @@ contract KesselHook is IUnlockCallback {
         if (_governance == address(0)) revert KesselErrors.ParameterOutOfBounds();
         if (_gasTokenSide > GAS_TOKEN_CURRENCY1) revert KesselErrors.ParameterOutOfBounds();
 
-       if (_gasTokenSide == GAS_TOKEN_CURRENCY1 && _currency0.isAddressZero()) {
+        if (_gasTokenSide == GAS_TOKEN_CURRENCY1 && _currency0.isAddressZero()) {
             revert KesselErrors.ParameterOutOfBounds();
         }
         gasTokenSide = _gasTokenSide;
@@ -181,15 +169,20 @@ contract KesselHook is IUnlockCallback {
             tickSpacing: _tickSpacing,
             hooks: IHooks(address(this))
         });
-        immutablePoolKeyStorage = pk;
         poolId = pk.toId();
     }
 
     function poolKey() public view returns (PoolKey memory) {
-        return immutablePoolKeyStorage;
+        return PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing: tickSpacing,
+            hooks: IHooks(address(this))
+        });
     }
 
-   function getHookPermissions() public pure returns (Hooks.Permissions memory) {
+    function getHookPermissions() public pure returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
@@ -208,7 +201,7 @@ contract KesselHook is IUnlockCallback {
         });
     }
 
-   function beforeSwap(
+    function beforeSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
@@ -251,7 +244,6 @@ contract KesselHook is IUnlockCallback {
                 FastLaneFee.premium(feeCharged, fBase)
             );
 
-           
             return (
                 IHooks.beforeSwap.selector,
                 BeforeSwapDeltaLibrary.ZERO_DELTA,
@@ -262,7 +254,6 @@ contract KesselHook is IUnlockCallback {
         return _openSlowOrder(key, params, trader, minOut, expiryEpochs);
     }
 
-    
     function _fastFee(
         SwapParams calldata params,
         uint256 priorityFee
@@ -280,7 +271,6 @@ contract KesselHook is IUnlockCallback {
         return FastLaneFee.fee(fBase, k, priorityFee, MAX_FAST_FEE);
     }
 
-   
     function _openSlowOrder(
         PoolKey calldata key,
         SwapParams calldata params,
@@ -290,7 +280,6 @@ contract KesselHook is IUnlockCallback {
     ) private returns (bytes4, BeforeSwapDelta, uint24) {
         if (paused) revert KesselErrors.Paused();
 
-       
         if (_settling) revert KesselErrors.SettlementInProgress();
 
         if (params.amountSpecified >= 0) revert KesselErrors.SlowLaneRequiresExactInput();
@@ -300,13 +289,13 @@ contract KesselHook is IUnlockCallback {
         bool zeroForOne = params.zeroForOne;
         Currency specified = zeroForOne ? key.currency0 : key.currency1;
 
-    if (specified.isAddressZero()) revert KesselErrors.NativeEthNotSupportedInSlowLane();
+        if (specified.isAddressZero()) revert KesselErrors.NativeEthNotSupportedInSlowLane();
 
         uint256 amountIn256 = uint256(-params.amountSpecified);
         if (amountIn256 > type(uint128).max) revert KesselErrors.AmountTooLarge();
         uint128 amountIn = uint128(amountIn256);
 
-       uint128 floorSize = zeroForOne ? minOrderSize0 : minOrderSize1;
+        uint128 floorSize = zeroForOne ? minOrderSize0 : minOrderSize1;
         if (amountIn < floorSize) revert KesselErrors.OrderBelowMinimum();
 
         _checkAndBookWarehouse(zeroForOne, amountIn);
@@ -315,10 +304,10 @@ contract KesselHook is IUnlockCallback {
 
         _recordOrder(trader, zeroForOne, amountIn, minOut, expiryEpochs);
 
-      return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(amountIn)), 0), 0);
+        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(uint128(amountIn)), 0), 0);
     }
 
-   function _recordOrder(
+    function _recordOrder(
         address trader,
         bool zeroForOne,
         uint128 amountIn,
@@ -381,8 +370,8 @@ contract KesselHook is IUnlockCallback {
     function settleFromCallback(
         uint32 epoch
     ) external {
-        if (msg.sender != address(this)) revert KesselErrors.NotPoolManager();
-        _settleEpoch(epoch);
+        if (msg.sender != address(this)) revert KesselErrors.NotSelf();
+        _settleEpochInner(epoch, address(0), 0);
     }
 
     function forceSettle() external {
@@ -391,7 +380,7 @@ contract KesselHook is IUnlockCallback {
         uint32 epoch = oldestUnsettledEpoch;
         if (!_forceSettleDue(epoch)) revert KesselErrors.SettlementNotDue();
 
-        poolManager.unlock(abi.encode(UnlockAction.SETTLE, epoch, uint256(0), uint256(0)));
+        poolManager.unlock(abi.encode(UnlockAction.SETTLE, epoch));
     }
 
     function settleWithFill(
@@ -409,7 +398,7 @@ contract KesselHook is IUnlockCallback {
         uint32 epoch = oldestUnsettledEpoch;
         if (!_piggybackDue(epoch)) revert KesselErrors.SettlementNotDue();
 
-        poolManager.unlock(abi.encode(UnlockAction.SETTLE_WITH_FILL, epoch, uint256(uint160(msg.sender)), delivered));
+        poolManager.unlock(abi.encode(UnlockAction.SETTLE_WITH_FILL, epoch, msg.sender, delivered));
     }
 
     function unlockCallback(
@@ -417,30 +406,23 @@ contract KesselHook is IUnlockCallback {
     ) external override returns (bytes memory) {
         if (msg.sender != address(poolManager)) revert KesselErrors.NotPoolManager();
 
-        (UnlockAction action, uint32 epoch, uint256 arg, uint256 arg2) =
-            abi.decode(data, (UnlockAction, uint32, uint256, uint256));
-
-        if (action == UnlockAction.SETTLE_WITH_FILL) {
-            if (!_settleEpochInner(epoch, address(uint160(arg)), arg2)) {
-                revert KesselErrors.NothingToSettle();
-            }
-            return "";
-        }
+        UnlockAction action = abi.decode(data[:32], (UnlockAction));
 
         if (action == UnlockAction.SETTLE) {
-            _settleEpoch(epoch);
+            (, uint32 epoch) = abi.decode(data, (UnlockAction, uint32));
+            _settleEpochInner(epoch, address(0), 0);
+        } else if (action == UnlockAction.SETTLE_WITH_FILL) {
+            (, uint32 epoch, address filler, uint256 delivered) =
+                abi.decode(data, (UnlockAction, uint32, address, uint256));
+            if (!_settleEpochInner(epoch, filler, delivered)) revert KesselErrors.NothingToSettle();
         } else if (action == UnlockAction.REDEEM) {
-            _payoutOrder(arg);
+            (, uint256 orderId) = abi.decode(data, (UnlockAction, uint256));
+            _payoutOrder(orderId);
         } else {
             _sweep();
         }
-        return "";
-    }
 
-   function _settleEpoch(
-        uint32 epoch
-    ) private {
-        _settleEpochInner(epoch, address(0), 0);
+        return "";
     }
 
     function _settleEpochInner(
@@ -450,44 +432,46 @@ contract KesselHook is IUnlockCallback {
     ) private returns (bool settled) {
         if (_settling) return false;
         _settling = true;
+        settled = _settleBatch(epoch, filler, delivered);
+        _settling = false;
+    }
 
-        Cand[] memory c = _loadCandidates(epoch);
-        if (c.length == 0) {
+    function _settleBatch(
+        uint32 epoch,
+        address filler,
+        uint256 delivered
+    ) private returns (bool) {
+        BatchOrder[] memory batch = _loadBatch(epoch);
+        if (batch.length == 0) {
             _advanceIfDrained(epoch);
-            _settling = false;
             return false;
         }
 
-        (Clearing.Solution memory sol, uint256 net0, uint256 net1, bool converged) = _solveEligibleSet(c);
+        (Clearing.Solution memory sol, uint256 net0, uint256 net1, bool converged) = _solveEligibleSet(batch);
 
         if (!converged || !sol.feasible || (net0 == 0 && net1 == 0)) {
-            if (net0 == 0 && net1 == 0) {
-                 _closeEpoch(epoch);
-                _rollUnfilled(epoch);
-            } else if (_pastLivenessEscape(epoch)) {
-               _closeEpoch(epoch);
+            if ((net0 == 0 && net1 == 0) || _pastLivenessEscape(epoch)) {
+                _closeEpoch(epoch);
                 _rollUnfilled(epoch);
             }
-            _settling = false;
             return false;
         }
 
-        if (filler != address(0)) _assertFillerNotInBatch(c, filler);
+        if (filler != address(0)) _assertFillerNotInBatch(batch, filler);
 
-        _executeAndDistribute(epoch, c, sol, net0, net1, filler, delivered);
+        _executeAndDistribute(epoch, batch, sol, net0, net1, filler, delivered);
 
-       if (filler != address(0) && sol.residualIn > 0) {
+        if (filler != address(0) && sol.residualIn > 0) {
             Currency inCurrency = sol.zeroForOne ? currency0 : currency1;
             inCurrency.settle(poolManager, address(this), sol.residualIn, true);
             poolManager.take(inCurrency, filler, sol.residualIn);
         }
 
-        _settling = false;
         return true;
     }
 
     function _assertFillerNotInBatch(
-        Cand[] memory c,
+        BatchOrder[] memory c,
         address filler
     ) private view {
         for (uint256 i; i < c.length; ++i) {
@@ -496,7 +480,7 @@ contract KesselHook is IUnlockCallback {
         }
     }
 
-struct Cand {
+    struct BatchOrder {
         uint256 id;
         bool zeroForOne;
         bool live;
@@ -506,19 +490,19 @@ struct Cand {
         uint128 netFilled;
     }
 
-    function _loadCandidates(
+    function _loadBatch(
         uint32 epoch
-    ) private view returns (Cand[] memory out) {
+    ) private view returns (BatchOrder[] memory out) {
         uint256[] storage ids = epochOrderIds[epoch];
         uint256 len = ids.length;
 
-        Cand[] memory buf = new Cand[](len);
+        BatchOrder[] memory buf = new BatchOrder[](len);
         uint256 n;
         for (uint256 i; i < len; ++i) {
             if (n == MAX_ORDERS_PER_EPOCH) break;
             Order storage o = orders[ids[i]];
-            if (o.status != OrderStatus.PENDING || o.amountInRemaining == 0 || _isExpired(o)) continue;
-            buf[n] = Cand({
+            if (!_isFillable(o)) continue;
+            buf[n] = BatchOrder({
                 id: ids[i],
                 zeroForOne: o.zeroForOne,
                 live: true,
@@ -530,7 +514,7 @@ struct Cand {
             ++n;
         }
 
-        out = new Cand[](n);
+        out = new BatchOrder[](n);
         for (uint256 i; i < n; ++i) {
             out[i] = buf[i];
         }
@@ -547,7 +531,7 @@ struct Cand {
     }
 
     function _solveEligibleSet(
-        Cand[] memory c
+        BatchOrder[] memory c
     ) private view returns (Clearing.Solution memory sol, uint256 net0, uint256 net1, bool converged) {
         for (uint256 round; round < MAX_CLEARING_ROUNDS; ++round) {
             (net0, net1) = _aggregateNet(c);
@@ -563,7 +547,7 @@ struct Cand {
     }
 
     function _aggregateNet(
-        Cand[] memory c
+        BatchOrder[] memory c
     ) private view returns (uint256 net0, uint256 net1) {
         uint24 slowFee = fSlow;
         for (uint256 i; i < c.length; ++i) {
@@ -575,7 +559,7 @@ struct Cand {
     }
 
     function _dropIneligible(
-        Cand[] memory c,
+        BatchOrder[] memory c,
         uint160 priceX96
     ) private view returns (uint256 dropped) {
         (uint256 effZeroForOne, uint256 effOneForZero) = _effectivePrices(priceX96);
@@ -601,7 +585,7 @@ struct Cand {
     }
 
     function _assertLimitsHeld(
-        Cand[] memory c,
+        BatchOrder[] memory c,
         Pots memory p
     ) private view {
         if (p.filled0 == 0 && p.filled1 == 0) return;
@@ -615,7 +599,7 @@ struct Cand {
             if (!c[i].live || c[i].grossFilled == 0) continue;
 
             uint256 limit = c[i].limitPriceX96;
-            uint256 slack = (limit * I8_TOLERANCE_PPM) / FEE_DENOMINATOR;
+            uint256 slack = (limit * LIMIT_PRICE_TOLERANCE_PPM) / FEE_DENOMINATOR;
 
             if (c[i].zeroForOne) {
                 if (effZeroForOne + slack < limit) revert KesselErrors.LimitPriceBreached();
@@ -627,7 +611,7 @@ struct Cand {
 
     function _executeAndDistribute(
         uint32 epoch,
-        Cand[] memory c,
+        BatchOrder[] memory c,
         Clearing.Solution memory sol,
         uint256 net0,
         uint256 net1,
@@ -665,32 +649,28 @@ struct Cand {
         uint256 settledCount = _applyFills(epoch, c, p);
 
         _recordEpoch(epoch, sol.priceX96, p, net0, net1, fee0, fee1, settledCount);
-        _recapture(immutablePoolKeyStorage, fee0, fee1);
+        _recapture(poolKey(), fee0, fee1);
         _rollUnfilled(epoch);
     }
 
     function _rollUnfilled(
         uint32 from
     ) private {
-         if (currentEpoch <= from) revert KesselErrors.EpochNotClosed();
+        if (currentEpoch <= from) revert KesselErrors.EpochNotClosed();
 
         uint256[] storage ids = epochOrderIds[from];
         uint256 len = ids.length;
 
         for (uint256 i; i < len; ++i) {
             Order storage o = orders[ids[i]];
-            if (o.status != OrderStatus.PENDING || o.amountInRemaining == 0) continue;
-            if (_isExpired(o)) continue; // expired: leave it behind
+            if (!_isFillable(o)) continue;
 
             epochOrderIds[_epochAcceptingOrders()].push(ids[i]);
         }
 
         delete epochOrderIds[from];
 
-        if (from == oldestUnsettledEpoch) {
-            oldestUnsettledEpoch = from + 1;
-            if (currentEpoch < oldestUnsettledEpoch) currentEpoch = oldestUnsettledEpoch;
-        }
+        if (from == oldestUnsettledEpoch) _advanceOldest(from);
     }
 
     struct Pots {
@@ -704,7 +684,7 @@ struct Cand {
     }
 
     function _computeFills(
-        Cand[] memory c,
+        BatchOrder[] memory c,
         uint256 lambdaX96
     ) private view returns (uint256 filled0, uint256 filled1, uint256 gross0, uint256 gross1) {
         uint24 slowFee = fSlow;
@@ -753,10 +733,10 @@ struct Cand {
         if (sol.residualIn == 0) return (0, 0);
 
         BalanceDelta d = poolManager.swap(
-            immutablePoolKeyStorage,
+            poolKey(),
             SwapParams({
                 zeroForOne: sol.zeroForOne,
-               amountSpecified: -int256(sol.residualIn.toInt128()),
+                amountSpecified: -int256(sol.residualIn.toInt128()),
                 sqrtPriceLimitX96: sol.sqrtPriceTargetX96
             }),
             ""
@@ -770,7 +750,7 @@ struct Cand {
         if (d1 > 0) currency1.take(poolManager, address(this), uint256(d1), true);
     }
 
-   function _acceptFillerDelivery(
+    function _acceptFillerDelivery(
         uint32 epoch,
         Clearing.Solution memory sol,
         address filler,
@@ -813,14 +793,14 @@ struct Cand {
         e.pot1 = p.pot1.toUint128();
         e.settled = true;
 
-       uint256 matched = p.filled0 < p.filled1 ? p.filled0 : p.filled1;
+        uint256 matched = p.filled0 < p.filled1 ? p.filled0 : p.filled1;
 
         emit KesselEvents.SlowBatchSettled(epoch, priceX96, net0, net1, matched, p.lambdaX96, fee0, fee1, settledCount);
     }
 
     function _applyFills(
         uint32 epoch,
-        Cand[] memory c,
+        BatchOrder[] memory c,
         Pots memory p
     ) private returns (uint256 settledCount) {
         uint256 left1 = p.pot1;
@@ -869,14 +849,14 @@ struct Cand {
         uint256 filled1
     ) private pure {
         if (filled0 == 0 || filled1 == 0) return; // one-sided: trivially uniform
-        if (pot0 < I4_DUST_FLOOR || pot1 < I4_DUST_FLOOR) return;
+        if (pot0 < UNIFORM_PRICE_DUST_FLOOR || pot1 < UNIFORM_PRICE_DUST_FLOOR) return;
 
         uint256 priceA = Clearing.impliedPriceX96(pot1, filled0); // currency0 sellers
         uint256 priceB = Clearing.impliedPriceX96(filled1, pot0); // currency1 sellers
         uint256 diff = priceA > priceB ? priceA - priceB : priceB - priceA;
         uint256 scale = priceA > priceB ? priceA : priceB;
 
-        if (diff * 1_000_000 > scale * I4_TOLERANCE_PPM) revert KesselErrors.NonUniformClearingPrice();
+        if (diff * 1_000_000 > scale * UNIFORM_PRICE_TOLERANCE_PPM) revert KesselErrors.NonUniformClearingPrice();
     }
 
     function _recapture(
@@ -907,15 +887,15 @@ struct Cand {
         {
             return;
         }
-        poolManager.unlock(abi.encode(UnlockAction.SWEEP, uint32(0), uint256(0), uint256(0)));
+        poolManager.unlock(abi.encode(UnlockAction.SWEEP));
     }
 
-function _sweep() private {
+    function _sweep() private {
         uint256 a0 = lpClaimable0 + _absorbStray(currency0);
         uint256 a1 = lpClaimable1 + _absorbStray(currency1);
         lpClaimable0 = 0;
         lpClaimable1 = 0;
-        _recapture(immutablePoolKeyStorage, a0, a1);
+        _recapture(poolKey(), a0, a1);
     }
 
     function _absorbStray(
@@ -939,7 +919,7 @@ function _sweep() private {
         bool expired = _isExpired(o);
         if (o.owedOut == 0 && !(expired && o.amountInRemaining > 0)) revert KesselErrors.NothingToRedeem();
 
-        poolManager.unlock(abi.encode(UnlockAction.REDEEM, uint32(0), orderId, uint256(0)));
+        poolManager.unlock(abi.encode(UnlockAction.REDEEM, orderId));
     }
 
     function _payoutOrder(
@@ -1000,6 +980,19 @@ function _sweep() private {
         if (epoch >= currentEpoch) currentEpoch = epoch + 1;
     }
 
+    function _isFillable(
+        Order storage o
+    ) private view returns (bool) {
+        return o.status == OrderStatus.PENDING && o.amountInRemaining > 0 && !_isExpired(o);
+    }
+
+    function _advanceOldest(
+        uint32 epoch
+    ) private {
+        oldestUnsettledEpoch = epoch + 1;
+        if (currentEpoch < oldestUnsettledEpoch) currentEpoch = oldestUnsettledEpoch;
+    }
+
     function _isExpired(
         Order storage o
     ) private view returns (bool) {
@@ -1040,7 +1033,6 @@ function _sweep() private {
         return _forceSettleDue(oldestUnsettledEpoch);
     }
 
-    
     function _netOfSlowFee(
         uint256 gross,
         uint24 slowFee
@@ -1057,27 +1049,24 @@ function _sweep() private {
             epochs[epoch].openedAtBlock = uint64(block.number);
         }
     }
-function _advanceIfDrained(
+
+    function _advanceIfDrained(
         uint32 epoch
     ) private {
         if (epoch != oldestUnsettledEpoch) return;
 
         uint256[] storage ids = epochOrderIds[epoch];
-         uint256 len = ids.length;
+        uint256 len = ids.length;
         if (len == 0) return;
 
         for (uint256 i; i < len; ++i) {
             Order storage o = orders[ids[i]];
-            if (o.status == OrderStatus.PENDING && o.amountInRemaining > 0 && !_isExpired(o)) {
-                return; // still fillable
-            }
+            if (_isFillable(o)) return;
         }
 
-        oldestUnsettledEpoch = epoch + 1;
-        if (currentEpoch < oldestUnsettledEpoch) currentEpoch = oldestUnsettledEpoch;
+        _advanceOldest(epoch);
     }
 
-    
     function _checkAndBookWarehouse(
         bool zeroForOne,
         uint128 amountIn
@@ -1093,7 +1082,6 @@ function _advanceIfDrained(
         }
     }
 
-    
     function setFees(
         uint24 newFBase,
         uint24 newFSlow
@@ -1211,7 +1199,7 @@ function _advanceIfDrained(
         uint32 epoch = oldestUnsettledEpoch;
         if (!_piggybackDue(epoch)) return (false, currency0, 0, currency1, 0);
 
-        Cand[] memory c = _loadCandidates(epoch);
+        BatchOrder[] memory c = _loadBatch(epoch);
         if (c.length == 0) return (false, currency0, 0, currency1, 0);
 
         (Clearing.Solution memory sol,,, bool converged) = _solveEligibleSet(c);

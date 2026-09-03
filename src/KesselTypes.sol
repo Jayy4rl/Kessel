@@ -19,7 +19,7 @@ struct Order {
     bool zeroForOne;
     uint64 expiryBlock;
     uint128 amountInRemaining;
-   uint128 owedOut;
+    uint128 owedOut;
     uint160 limitPriceX96;
     uint32 epochSubmitted;
     uint32 epochExpiry;
@@ -27,7 +27,7 @@ struct Order {
 }
 
 struct Epoch {
-   uint64 openedAtBlock;
+    uint64 openedAtBlock;
     uint160 clearingPriceX96;
     uint128 filledNetIn0;
     uint128 filledNetIn1;
@@ -40,7 +40,7 @@ library KesselErrors {
     error SlowLaneRequiresExactInput();
     error NativeEthNotSupportedInSlowLane();
     error MalformedSlowOrder();
-     error MinOutRequired();
+    error MinOutRequired();
     error AmountTooLarge();
     error ExpiryOutOfRange();
     error OrderBelowMinimum();
@@ -49,7 +49,6 @@ library KesselErrors {
     error OrderNotFound();
     error NothingToRedeem();
     error AlreadyFinalised();
-    error NotYetExpired();
 
     error NotGovernance();
     error ParameterOutOfBounds();
@@ -57,8 +56,9 @@ library KesselErrors {
     error Paused();
 
     error NotPoolManager();
+    error NotSelf();
     error UnknownPool();
-    
+
     error SettlementNotDue();
     error NothingToSettle();
     error SettlementInProgress();
@@ -66,12 +66,12 @@ library KesselErrors {
     error InvalidFiller();
     error FillerPathRequiresERC20();
     error LimitPriceBreached();
-     error NonUniformClearingPrice();
-     error EpochNotClosed();
+    error NonUniformClearingPrice();
+    error EpochNotClosed();
 }
 
 library KesselEvents {
-   event FastSwap(
+    event FastSwap(
         address indexed sender,
         bool zeroForOne,
         int256 amountSpecified,
@@ -108,9 +108,9 @@ library KesselEvents {
     event RecaptureDeferred(address indexed currency, uint256 amount);
     event RecaptureDonated(uint256 amount0, uint256 amount1);
 
-     event SettlementSkipped(uint32 indexed epoch);
+    event SettlementSkipped(uint32 indexed epoch);
 
-     event SlowBatchFilledExternally(
+    event SlowBatchFilledExternally(
         uint32 indexed epoch, address indexed filler, uint256 amountIn, uint256 curveFloorOut, uint256 actualOut
     );
 

@@ -124,13 +124,16 @@ contract EntryPointsTest is KesselTestBase {
     /// call frame. Externally it would be a settlement with none of
     /// `afterSwap`'s gates applied — no lane check, no pause check, no
     /// piggyback-due check, and no `unlock`.
+    /// @dev The guard is `msg.sender == address(this)`, so even the PoolManager
+    /// is refused -- which is why the error names the contract itself rather
+    /// than the PoolManager, as it misleadingly used to.
     function test_settleFromCallbackIsNotAPublicSettlementEntryPoint() public {
         vm.prank(alice);
-        vm.expectRevert(KesselErrors.NotPoolManager.selector);
+        vm.expectRevert(KesselErrors.NotSelf.selector);
         hook.settleFromCallback(0);
 
         vm.prank(address(manager));
-        vm.expectRevert(KesselErrors.NotPoolManager.selector);
+        vm.expectRevert(KesselErrors.NotSelf.selector);
         hook.settleFromCallback(0);
     }
 

@@ -8,10 +8,8 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 library TickScan {
-    
     uint256 internal constant MAX_BITMAP_WORDS = 8;
 
-    
     function activeRangeTicks(
         IPoolManager poolManager,
         PoolId poolId,
@@ -25,7 +23,6 @@ library TickScan {
         upperTick = _scanUp(poolManager, poolId, compressed, spacing);
     }
 
-  
     function _scanDown(
         IPoolManager poolManager,
         PoolId poolId,
