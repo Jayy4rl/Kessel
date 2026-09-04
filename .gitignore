@@ -1,0 +1,30 @@
+# Foundry
+out/
+cache/
+broadcast/
+.forge-snapshots/
+foundry.lock
+
+# Coverage
+lcov.info
+coverage/
+
+# Environment
+.env
+.env.local
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Node (only if a dashboard/tooling package is added later)
+node_modules/
+
+# Frontend
+dist/
+.vite/
+*.local
+dev.log
+.ssr/

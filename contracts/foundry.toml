@@ -1,0 +1,115 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = ["lib"]
+
+# Pinned to match v4-core / v4-periphery. Cancun is required: the design uses
+# transient storage in hot paths, and v4's own lock is transient-storage based.
+solc = "0.8.26"
+evm_version = "cancun"
+bytecode_hash = "none"
+
+# via_ir is OFF by default for a fast edit/test loop. It is ON in the `optimized`
+# profile, which is the ONLY profile that may be used for gas profiling and for
+# deployment -- see the note on address mining below.
+via_ir = false
+optimizer = true
+optimizer_runs = 800
+
+ffi = true
+gas_limit = "3000000000"
+fs_permissions = [
+    { access = "read-write", path = ".forge-snapshots/" },
+    # Read-only, scoped to one directory: the A3 fork test consumes a
+    # measurement produced by `script/a3_ordering.py`, which it cannot fetch
+    # itself (`vm.rpc` returns JSON ABI-encoded, so an `eth_getBlockByNumber`
+    # object is unparseable in Solidity). Read-only on purpose — the test must
+    # not be able to rewrite the evidence it asserts against.
+    { access = "read", path = "./test/fork/data" },
+    # Read-only for the same reason: `test/property/ClearingDifferential.t.sol`
+    # asserts against a fixture produced by `script/clearing_reference.py`, and
+    # must not be able to rewrite the evidence it checks itself against.
+    { access = "read", path = "./test/data" },
+]
+
+# v4-core's test helpers use `vm.expectRevert` on internal calls.
+allow_internal_expect_revert = true
+
+[profile.default.fuzz]
+runs = 1000
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+
+# ---------------------------------------------------------------------------
+# `optimized` -- production compilation settings.
+#
+# WARNING: the hook's CREATE2 address is mined over its creation bytecode, which
+# depends on these settings. Once the address is mined (Phase 6), every
+# subsequent deployment MUST use this exact profile or the address -- and
+# therefore the hook's permission bitmap -- will not match. Do not change these
+# values after mining.
+# ---------------------------------------------------------------------------
+[profile.optimized]
+# Deployed BatchSolver. The hook address is CREATE2-mined over creation
+# bytecode containing this address, so it must be fixed before mining.
+libraries = ["src/settle/BatchSolver.sol:BatchSolver:0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81"]
+via_ir = true
+optimizer = true
+# Tuned for SIZE, not for runtime gas. `KesselHook` is close to EIP-170's
+# 24,576-byte ceiling, and `optimizer_runs` is the single largest lever on
+# that: at 44444444 the contract compiled to 40,304 bytes and could not be
+# deployed at all, while 200 brings it to ~25,000 with the same source.
+#
+# Raising this again without re-checking `forge build --sizes` will silently
+# produce an undeployable contract, because the test suite places runtime
+# bytecode with `vm.etch` and never exercises the limit.
+optimizer_runs = 200
+
+[profile.ci]
+via_ir = false
+optimizer_runs = 800
+
+[profile.ci.fuzz]
+runs = 10000
+
+[profile.ci.invariant]
+runs = 512
+depth = 128
+fail_on_revert = false
+
+# Fast profile for iterating on a single test.
+[profile.lite]
+optimizer = false
+
+[profile.lite.fuzz]
+runs = 64
+
+[profile.lite.invariant]
+runs = 16
+depth = 16
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+multiline_func_header = "params_first"
+sort_imports = true
+
+[rpc_endpoints]
+# DD-2 selected Base mainnet (2026-08-23). `base` is the endpoint PRD §15
+# scenario 10's A3 fork test reads; it must be an ARCHIVE endpoint, since the
+# test forks at historical heights and pulls whole historical blocks. The
+# testnet entries below remain candidates for other fork work.
+base = "${BASE_RPC_URL}"
+unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC_URL}"
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+sepolia = "${SEPOLIA_RPC_URL}"
+
+[etherscan]
+unichain_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 1301 }
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
