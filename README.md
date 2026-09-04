@@ -8,28 +8,10 @@ the queue, and that premium goes to LPs instead of the block builder; the slow
 lane escrows the trade, batches it, and clears every order in the batch at a
 single price — so position within the batch is worth nothing to a sandwicher.
 
-🎬 **Demo video:** pending  ·  🌐 **Live app:** pending (runs locally, see [Run it](#run-it))
-
-## Hookathon submission
-
-- **Submission type:** Uniswap Hook Incubator (UHI)
-- **Public repo:** https://github.com/Jayy4rl/Kessel
-- **Live app:** pending
-- **Demo video:** pending
 
 ## Partner integrations
 
-Kessel integrates the following partner technologies in working code:
-
-| Partner / tech | Where |
-|---|---|
-| Uniswap v4 Hooks | [`contracts/src/KesselHook.sol`](contracts/src/KesselHook.sol) — `beforeSwap` routes lanes and prices urgency, `afterSwap` carries settlement, `beforeSwapReturnDelta` escrows slow-lane input as an ERC-6909 claim. Lifecycle tests in [`contracts/test/integration/`](contracts/test/integration/) |
-| Base (OP-Stack priority ordering) | The fast-lane tax only works where the sequencer orders by priority fee. Measured against real Base blocks in [`contracts/test/fork/A3PriorityOrdering.t.sol`](contracts/test/fork/A3PriorityOrdering.t.sol) — 96.07% of adjacent transaction pairs correctly ordered, 323,885 pairs across 12 blocks |
-| OpenZeppelin `uniswap-hooks` | `CurrencySettler` for the async custody path in [`contracts/src/KesselHook.sol`](contracts/src/KesselHook.sol) |
-
-The mock ERC-20s and test routers in this repo are standard v4 test contracts
-used for transparent testnet accounting; they are not submitted as external
-partner integrations.
+Kessel has no partner integrations
 
 ## Deployed contracts
 
@@ -46,10 +28,6 @@ partner integrations.
 | Uniswap v4 PoolManager | [`0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`](https://sepolia.basescan.org/address/0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408) |
 
 Pool ID `0x9be8cc8e62ffa0921506a9e4ac87fa0b7f84aede541b824d9da2abd6e3496168`,
-CREATE2 salt `1871`. The hook address ends in `0x80C8` because v4 encodes a
-hook's permissions in its low address bits — `0xC8` *is*
-`beforeSwap | afterSwap | beforeSwapReturnDelta`, so the address is
-self-certifying.
 
 ## How it works
 
@@ -66,13 +44,6 @@ self-certifying.
    every order clears at one price. If the pool goes quiet, anyone can force
    settlement.
 
-## Repo
-
-| Path | What |
-|---|---|
-| [`contracts/`](contracts/) | Foundry contracts, tests, deploy and demo scripts |
-| [`frontend/`](frontend/) | Vite + React app (wagmi, live data) |
-| [`contracts/docs/PRD.md`](contracts/docs/PRD.md) | Canonical protocol specification |
 
 ## Run it
 
@@ -97,10 +68,7 @@ fails.
 
 Live on testnet. Verified end-to-end on a real chain: a slow-lane order escrows
 into the hook on Base Sepolia, a later fast-lane swap carries the batch as a side
-effect of its own trade, the order clears, and the trader redeems in full. The
-lane spread shows up in the fills — the same 0.01 input returned
-`9,969,801,202,164,028` through the fast lane and `9,994,361,770,855,610` through
-the slow one, a 0.246% advantage against a 0.25% fee spread.
+effect of its own trade, the order clears, and the trader redeems in full.
 
 **261 tests pass on both compiler pipelines**, including all twelve protocol
 invariants as stateful assertions (256 runs × 16,384 calls, zero reverts).
@@ -109,8 +77,4 @@ settlement formula is checked against exact-rational arithmetic over 512 cases
 by [`contracts/script/clearing_reference.py`](contracts/script/clearing_reference.py),
 because every other test verifies the price against itself.
 
-Testnet only — not audited, not reviewed by a human, not for production funds.
-Two findings from an earlier review are deliberately open and recorded in the
-repo: settlement timing is attacker-selectable across batches (uniform pricing
-protects orders *within* a batch), and a gas-limited fast swap can suppress
-piggyback settlement, for which `forceSettle` is the escape.
+Testnet only
