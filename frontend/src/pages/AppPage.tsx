@@ -346,7 +346,7 @@ function Swap({
           className={lane === "slow" ? "seg-b active slow" : "seg-b"}
           onClick={() => setLane("slow")}
         >
-          Slow
+          Order
           <span>batch · 0.05%</span>
         </button>
       </div>
@@ -423,7 +423,7 @@ function Swap({
           ? "Submitting…"
           : lane === "fast"
             ? "Swap now"
-            : "Place slow order"}
+            : "Place order"}
       </button>
       <TxNote tx={tx} />
     </section>
@@ -500,7 +500,7 @@ function Orders({ owner, nextOrderId, tick }: { owner: Address; nextOrderId: big
   return (
     <section className="card">
       <div className="card-head">
-        <h3>Your slow orders</h3>
+        <h3>Your orders</h3>
         <span className="card-note">redeem once settled</span>
       </div>
       <table>

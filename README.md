@@ -1,226 +1,116 @@
 # Kessel
 
-A Uniswap v4 hook implementing **two execution lanes on one shared liquidity curve**. Liquidity is never fragmented; the trader picks a lane per swap.
+**Two execution lanes on one Uniswap v4 liquidity curve.**
 
-- **Fast Lane** — synchronous, in-block. Dynamic fee `f_base + tax(priorityFeePerGas)`. The premium above `f_base` is recaptured to LPs rather than left to sequencers or searchers.
-- **Slow Lane** — deferred. The hook escrows the input and issues a non-transferable, non-cancellable claim. All orders in a batch clear at a **single uniform price computed at settlement time**, which is what makes the lane sandwich-proof and removes the hedgeable basis.
+Traders choose between paying for immediacy and waiting for a better price. The
+fast lane's fee rises with the priority fee a trader is already paying to jump
+the queue, and that premium goes to LPs instead of the block builder; the slow
+lane escrows the trade, batches it, and clears every order in the batch at a
+single price — so position within the batch is worth nothing to a sandwicher.
 
-Letting traders self-select by urgency is a screening mechanism: it prices **immediacy** — a real cost the LP bears for filling *now* against committed inventory — and routes that premium to LPs. It does **not** price or identify toxicity, does not remove adverse selection from the Slow Lane, and does not reduce total LVR. See `docs/PRD.md` §1–§2.
+🎬 **Demo video:** pending  ·  🌐 **Live app:** pending (runs locally, see [Run it](#run-it))
 
-## Status
+## Hookathon submission
 
-**Implemented and tested; not reviewed by a human.**
+- **Submission type:** Uniswap Hook Incubator (UHI)
+- **Public repo:** https://github.com/Jayy4rl/Kessel
+- **Live app:** pending
+- **Demo video:** pending
 
-`src/` holds `KesselHook.sol` plus four libraries. **261 tests pass** on both compiler pipelines, including all twelve protocol invariants as real stateful assertions (256 runs × 16,384 calls, zero reverts). Two of them need a Base RPC endpoint and skip without one — see [Testing](#testing).
+## Partner integrations
 
-`docs/PRD.md` is the canonical specification and the document to review against.
+Kessel integrates the following partner technologies in working code:
 
-## Layout
+| Partner / tech | Where |
+|---|---|
+| Uniswap v4 Hooks | [`contracts/src/KesselHook.sol`](contracts/src/KesselHook.sol) — `beforeSwap` routes lanes and prices urgency, `afterSwap` carries settlement, `beforeSwapReturnDelta` escrows slow-lane input as an ERC-6909 claim. Lifecycle tests in [`contracts/test/integration/`](contracts/test/integration/) |
+| Base (OP-Stack priority ordering) | The fast-lane tax only works where the sequencer orders by priority fee. Measured against real Base blocks in [`contracts/test/fork/A3PriorityOrdering.t.sol`](contracts/test/fork/A3PriorityOrdering.t.sol) — 96.07% of adjacent transaction pairs correctly ordered, 323,885 pairs across 12 blocks |
+| OpenZeppelin `uniswap-hooks` | `CurrencySettler` for the async custody path in [`contracts/src/KesselHook.sol`](contracts/src/KesselHook.sol) |
 
-```
-contracts/   Foundry project: the hook, its libraries, tests, deploy scripts
-frontend/    Vite + React dApp: landing page, wallet connect, both lanes
-docs/        PRD.md, the canonical protocol specification
-```
+The mock ERC-20s and test routers in this repo are standard v4 test contracts
+used for transparent testnet accounting; they are not submitted as external
+partner integrations.
 
-## Quick start
+## Deployed contracts
 
-```bash
-git submodule update --init --recursive
-
-cd contracts && forge test      # 261 passed, 2 skipped
-cd ../frontend && npm install && npm run dev
-```
-
-Expect `261 passed, 0 failed, 2 skipped`. The two skips are the live-RPC halves of the A3 fork test and are explained below; set `BASE_RPC_URL` to run them and the count becomes 263 passed, 0 skipped. Nothing else requires configuration.
-
-Dependencies nest — `v4-core` and `permit2` are submodules of `v4-periphery` — so `--recursive` is required, not optional. Every `forge` command runs from `contracts/`.
-
-The frontend talks to the live Base Sepolia deployment. A landing page explains
-the mechanism; **Launch app** opens the trading view, which needs an injected
-wallet on Base Sepolia and nothing else — the pool's tokens are mocks with a
-public `mint`, so anyone can fund themselves and trade.
-
-From there you can mint test tokens, approve the routers, add liquidity, swap
-through either lane, and redeem a settled slow order. To see the mechanism
-work end to end: place a slow order, wait `minSettleAge` blocks, then send a
-fast swap — that swap carries the batch, and the order becomes redeemable.
-
-Live pool state (fees, epoch, block, pending orders) is read from the hook. The
-fee curve is computed from the same formula the contract runs, so it is the fee
-the pool would actually charge rather than an illustration of one.
-
-## Deployed — Base Sepolia (84532)
-
-Live as of 2026-09-03. Testnet, mock tokens; nothing here is a production pool.
+**Base Sepolia** (chain 84532):
 
 | Contract | Address |
 |---|---|
-| `KesselHook` | [`0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8`](https://sepolia.basescan.org/address/0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8) |
-| `BatchSolver` (linked library) | [`0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81`](https://sepolia.basescan.org/address/0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81) |
-| Test token A (`currency0`) | [`0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf`](https://sepolia.basescan.org/address/0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf) |
-| Test token B (`currency1`) | [`0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F`](https://sepolia.basescan.org/address/0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F) |
-| v4 `PoolManager` | [`0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`](https://sepolia.basescan.org/address/0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408) |
+| KesselHook | [`0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8`](https://sepolia.basescan.org/address/0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8) |
+| BatchSolver (linked library) | [`0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81`](https://sepolia.basescan.org/address/0x25048aB11E111a43D5cfebEE567b3F1BA48BCF81) |
+| Token A — `currency0` (faucet) | [`0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf`](https://sepolia.basescan.org/address/0xb94817ebA9282307Fb7b1351051f9a5A7Fc483Cf) |
+| Token B — `currency1` (faucet) | [`0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F`](https://sepolia.basescan.org/address/0xeB8Aa36077cac1C6B5Bed16A2A1e52778e54eD4F) |
+| Swap router | [`0xff870819bC7Cd14dEFbd32CdD076AcEfF6521D9e`](https://sepolia.basescan.org/address/0xff870819bC7Cd14dEFbd32CdD076AcEfF6521D9e) |
+| Liquidity router | [`0x7CD076795953e44456dD3E8569e43C34f96Bdb09`](https://sepolia.basescan.org/address/0x7CD076795953e44456dD3E8569e43C34f96Bdb09) |
+| Uniswap v4 PoolManager | [`0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408`](https://sepolia.basescan.org/address/0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408) |
 
-- **Pool ID** `0x9be8cc8e62ffa0921506a9e4ac87fa0b7f84aede541b824d9da2abd6e3496168`
-- **CREATE2 salt** `1871`, mined through the canonical factory `0x4e59b448…B4956C`
-- **Runtime size** 22,515 bytes, 2,061 under the EIP-170 limit
-- **Governance** `0xE8E0Ae7555f1a9a0479b97a86ACca2Dc81bf9922`
-- **Seeded** 500 ether of liquidity across ticks −60000 → 60000
+Pool ID `0x9be8cc8e62ffa0921506a9e4ac87fa0b7f84aede541b824d9da2abd6e3496168`,
+CREATE2 salt `1871`. The hook address ends in `0x80C8` because v4 encodes a
+hook's permissions in its low address bits — `0xC8` *is*
+`beforeSwap | afterSwap | beforeSwapReturnDelta`, so the address is
+self-certifying.
 
-The address ends in `0x80C8` — the low 14 bits are v4's permission bitmap, so
-`0xC8` *is* `beforeSwap | afterSwap | beforeSwapReturnDelta`. Verify it:
+## How it works
 
-```bash
-cast call 0xD9b438e017D37bE8C3205f3814241b8D9F9d80c8 'fBase()(uint24)'   --rpc-url https://sepolia.base.org        # 3000
-```
+1. **Choose a lane** — one byte of `hookData`. Send nothing and you get FAST, so
+   routers that have never heard of this hook still trade normally.
+2. **Fast prices urgency** — the hook reads `tx.gasprice - block.basefee` and
+   charges `f_base + k × priorityFee`, capped. At 20 gwei that is 1.30% against a
+   0.30% floor, and everything above the floor is recaptured to LPs.
+3. **Slow escrows instead of swapping** — `beforeSwap` returns a delta consuming
+   the full input, the hook mints itself an ERC-6909 claim, and records the order.
+   No swap math runs.
+4. **A later fast swap settles the batch** — no keeper, no solver. Opposing
+   orders net against each other first; only the imbalance touches the curve, and
+   every order clears at one price. If the pool goes quiet, anyone can force
+   settlement.
 
-### The safety parameters are set on this deployment
+## Repo
 
-`maxWarehouse` is **50 tokens per direction** and `minOrderSize` is **0.001**.
-Both default to no-ops (`type(uint128).max` and `0`) and must be set explicitly
-for the pair, which the first deployment did not do — so a slow order orders of
-magnitude larger than the pool was accepted rather than rejected. The warehouse
-cap is the protocol's own answer to that and only works when it is configured.
-
-### A previous deployment was destroyed, deliberately kept as a record
-
-The first hook (`0x813E…00C8`) still exists with its pool at `MIN_TICK` and
-zero active liquidity. A single oversized swap walked the price through the
-whole liquidity range, because the frontend passed `MIN_SQRT_PRICE` as the
-swap's price limit — which is not a limit but a licence to move the price as
-far as the trade reaches. The contract behaved correctly throughout: both
-fillable batches settled, and `SettlementSkipped` never fired.
-
-### Redeploying
-
-`script/Deploy.s.sol` runs in phases, and the order is not optional: the hook's
-creation bytecode embeds `BatchSolver`'s address, and the hook address is mined
-over that bytecode. Deploy the library first, pin it in **both** `foundry.toml`
-(`libraries` under `[profile.optimized]`) and `BATCH_SOLVER`, recompile, then
-mine and deploy. Both phases need `FOUNDRY_PROFILE=optimized` — the dev profile
-compiles the hook over the size limit and the deployment simply fails.
-
-`script/Demo.s.sol` then seeds liquidity and runs the loop end to end: a
-Fast-Lane swap, a Slow-Lane order, a piggyback settlement carried by a later
-Fast swap, and a redeem.
-
-## Architecture
-
-```
-contracts/src/
-  KesselHook.sol        All state. Implements beforeSwap / afterSwap /
-                        unlockCallback, and owns every stateful decision:
-                        lane routing, Slow-Lane intake and custody, the order
-                        book, settlement, redemption, recapture, governance.
-
-  KesselTypes.sol       Lane, OrderStatus, Order, Epoch, errors and events.
-                        One shared vocabulary, so the pure libraries and the
-                        hook agree without importing each other.
-
-  lanes/
-    LaneCodec.sol       PURE. hookData encode/decode and the default-lane rule.
-    FastLaneFee.sol     PURE. g(priorityFee, ...) -> uint24, saturating and
-                        monotone. Two tax modes: size-denominated where one
-                        side of the pool is the gas token, rate form otherwise.
-
-  settle/
-    Clearing.sol        PURE. The uniform-price closed form, the residual, and
-                        the fill ratio. Accepts no submission-time state at
-                        all, which is how anti-hedging is enforced structurally
-                        rather than by review.
-    BatchSolver.sol     Deployed library. Walks up to four constant-liquidity
-                        ranges to size the settlement residual and predict the
-                        batch price. Separated from the hook to stay under the
-                        EIP-170 bytecode limit.
-    TickScan.sol        Tick-bitmap search for the active range bounds.
-                        Internal; inlines into BatchSolver.
-```
-
-`BatchSolver` is a linked library, so deployment is two transactions: deploy the library, then deploy the hook against it.
-
-### Deployment constraint
-
-`KesselHook` is close to the EIP-170 24,576-byte runtime limit. **Only the `optimized` profile produces a deployable contract**, and `optimizer_runs` there is tuned for size rather than runtime gas:
-
-```bash
-FOUNDRY_PROFILE=optimized forge build --sizes
-```
-
-The test suite places runtime bytecode with `vm.etch`, which bypasses the size limit entirely — so `forge test` passing is **not** evidence that the contract can be deployed. Check `--sizes` after any change to `src/`.
-
-The hook is immutable and bound to a single pool at construction. That binding is a security requirement, not a simplification: ERC-6909 custody is held per *currency*, so a hook serving two pools that share a currency could have one pool's settlement drain the other's escrow.
-
-## Testing
-
-| Directory | What it covers |
+| Path | What |
 |---|---|
-| `test/invariant/` | All twelve invariants as stateful assertions, none skipped, driven by `KesselHandler`. A thirteenth proves a run was not vacuous. |
-| `test/property/` | Fuzz tests over the pure libraries, including against v4's own `SqrtPriceMath`, plus the differential test described below. |
-| `test/integration/` | Fast Lane, Slow Lane, settlement, lifecycle, governance, multi-range clearing, native and gas-token pools. |
-| `test/security/` | Adversarial tests. Each was written before its fix and observed to fail first, so each is a regression lock: if one starts failing, a closed attack has reopened. |
-| `test/scaffold/` | Pins upstream v4 behaviours the design depends on. A failure here after a dependency bump means an assumption changed, not that a test is flaky. |
-| `test/economic/` | Measurements rather than assertions: settlement-gas incidence, `k` calibration, clearing-price manipulation. |
-| `test/fork/` | Assumption A3 — that the target chain orders by priority fee. |
+| [`contracts/`](contracts/) | Foundry contracts, tests, deploy and demo scripts |
+| [`frontend/`](frontend/) | Vite + React app (wagmi, live data) |
+| [`contracts/docs/PRD.md`](contracts/docs/PRD.md) | Canonical protocol specification |
 
-### The settlement price is checked against an independent model
-
-Every other test checks the clearing price against *itself*: the invariants
-confirm a batch is solvent and uniformly priced whatever price the solver
-picked — which stays true even if the solver picks the wrong one. Since the
-settlement formula is the one part of the protocol that can never be patched,
-it is also checked against arithmetic that shares no code with it.
-
-`script/clearing_reference.py` does two things Solidity cannot:
-
-1. It proves the closed form satisfies `L*(a-b) = N0*a*b - N1` — the solvency
-   equation the derivation claims to solve — **exactly**, in rationals. That is
-   not a re-implementation of the same formula, which would be circular; it is
-   a check against the condition the formula is derived from.
-2. It evaluates that form with `fractions.Fraction`, so the emitted fixture
-   carries no rounding at all.
-
-`test/property/ClearingDifferential.t.sol` replays the fixture through the real
-contract, whose integer arithmetic floors at every step, and asserts they agree.
-A contract computing a different formula diverges by orders of magnitude.
+## Run it
 
 ```bash
-python script/clearing_reference.py        # regenerate; the seed is fixed
-forge test --match-path 'test/property/ClearingDifferential.t.sol'
+# Contracts
+cd contracts && git submodule update --init --recursive && forge test
+
+# Frontend
+cd frontend && npm install && npm run dev
 ```
 
-Measured divergence is ~1e-25 relative, against the 1e-6 tolerance the
-post-settlement limit re-check runs with. Note the rounding has no guaranteed
-*direction*: flooring shrinks the closed form's numerator and denominator in
-opposite senses, so the error can fall either way. The test asserts a bound, not
-a sign.
+Expect `261 passed, 0 failed, 2 skipped` — the two skips are the live-RPC halves
+of the A3 fork test and need `BASE_RPC_URL` set to a Base archive endpoint.
 
-**The two skipped tests.** `test/fork/A3PriorityOrdering.t.sol` contains two tests that fork Base mainnet and need `BASE_RPC_URL` set to an **archive** endpoint. Without it they skip with an explanatory message rather than silently passing, because a local mock would only prove the mock was written to pass.
+Deployment is two phases, and the order is not optional: the hook's creation
+bytecode embeds `BatchSolver`'s address, and the hook address is CREATE2-mined
+over that bytecode. Both phases need `FOUNDRY_PROFILE=optimized` — the dev
+profile compiles the hook over the EIP-170 size limit and deployment simply
+fails.
 
-The evidence for A3 is not lost with them: `test_A3_baseOrdersAdjacentTransactionsByPriorityFee` runs offline against committed measurements in `test/fork/data/a3-ordering.json` — Base mainnet, 12 blocks, 323,885 transaction pairs, **96.07% of adjacent pairs correctly ordered by priority fee** against a 90% floor. That is the property the Fast Lane depends on: an actor landing immediately ahead of a victim must have outbid it.
+## Status
 
-To run the live halves:
+Live on testnet. Verified end-to-end on a real chain: a slow-lane order escrows
+into the hook on Base Sepolia, a later fast-lane swap carries the batch as a side
+effect of its own trade, the order clears, and the trader redeems in full. The
+lane spread shows up in the fills — the same 0.01 input returned
+`9,969,801,202,164,028` through the fast lane and `9,994,361,770,855,610` through
+the slow one, a 0.246% advantage against a 0.25% fee spread.
 
-```bash
-BASE_RPC_URL=<base mainnet archive endpoint> forge test --match-path 'test/fork/*' -vv
-```
+**261 tests pass on both compiler pipelines**, including all twelve protocol
+invariants as stateful assertions (256 runs × 16,384 calls, zero reverts).
+Coverage 99.72% lines, 100% functions. Slither: no high or medium findings. The
+settlement formula is checked against exact-rational arithmetic over 512 cases
+by [`contracts/script/clearing_reference.py`](contracts/script/clearing_reference.py),
+because every other test verifies the price against itself.
 
-## Profiles
-
-```bash
-forge test                              # default: fast dev loop, via_ir off
-FOUNDRY_PROFILE=lite forge test         # lowest fuzz counts, fastest iteration
-FOUNDRY_PROFILE=ci forge test           # high fuzz and invariant counts
-FOUNDRY_PROFILE=optimized forge build   # production settings; the only deployable build
-forge test --gas-report                 # gas profiling
-forge fmt --check                       # formatting, as CI runs it
-```
-
-## Documentation
-
-| File | Role |
-|---|---|
-| `docs/PRD.md` | Canonical protocol specification. Source of truth, and the document to review against. |
-| `docs/SKILLS.md` | Uniswap AI plugin ecosystem for coding agents. |
-
-The PRD marks requirements `[REQUIRED]`, implementation freedom `[SUGGESTED]`, and genuine open decisions `[OPEN]`. An `[OPEN]` item is never a protocol requirement, and a "recommendation" printed next to one is not a decision.
+Testnet only — not audited, not reviewed by a human, not for production funds.
+Two findings from an earlier review are deliberately open and recorded in the
+repo: settlement timing is attacker-selectable across batches (uniform pricing
+protects orders *within* a batch), and a gas-limited fast swap can suppress
+piggyback settlement, for which `forceSettle` is the escape.
