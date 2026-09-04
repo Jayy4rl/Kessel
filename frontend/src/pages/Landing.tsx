@@ -85,7 +85,11 @@ export default function Landing({ onLaunch }: { onLaunch: () => void }) {
           in a <span className="hero-accent">hurry.</span>
         </h1>
 
-        <p className="hero-sub">So why does everyone pay the same fee?</p>
+        <p className="hero-sub">
+          So why does everyone pay the same fee? Kessel gives one pool two lanes. Need it now?
+          Take the fast one. Happy to wait a few seconds? Pay a sixth as much — and become
+          impossible to sandwich.
+        </p>
 
         <div className="hero-cta">
           <button className="pill big" onClick={onLaunch}>
