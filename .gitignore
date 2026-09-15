@@ -21,3 +21,6 @@ dist/
 .vite/
 *.local
 dev.log
+
+#prd
+prd-bitcoin-staking-portfolio-manager-v2.md

@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import {
   vitestSetupFilePath,
   getClarinetVitestsArgv,
@@ -27,6 +27,8 @@ export default defineConfig({
     // clarinet handles test isolation by resetting the simnet between tests
     isolate: false,
     maxWorkers: 1,
+    // Mainnet-fork tests need the network; they run via `npm run test:fork`.
+    exclude: [...configDefaults.exclude, "tests-fork/**"],
     setupFiles: [
       vitestSetupFilePath,
       // custom setup files can be added here

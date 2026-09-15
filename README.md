@@ -7,7 +7,7 @@ Clarity smart contracts on Stacks, with a React frontend.
 | Folder | What's in it |
 |---|---|
 | [`contracts/`](contracts/) | Clarinet project — Clarity contracts in `contracts/`, Vitest + `@stacks/clarinet-sdk` tests in `tests/`, network settings in `settings/` |
-| [`frontend/`](frontend/) | Vite + React + TypeScript, with `@stacks/connect`, `@stacks/transactions` and `@stacks/network` |
+| [`frontend/`](frontend/) | Vite + React + TypeScript. [`src/lib/`](frontend/src/lib/) holds the claim-then-deposit flow: sBTC pool ranking from the Bitflow API, and wallet-ready transactions for the PoX-5 staker claim and each deposit venue (Bitflow HODLMM, Zest v2, StackingDAO stBTC, Hermetica hBTC) |
 
 ## Prerequisites
 
@@ -31,7 +31,17 @@ clarinet contract new <name>
 cd frontend
 npm install
 npm run dev           # http://localhost:5173
+npm test              # unit tests for src/lib
 ```
+
+## Deploying rewards
+
+Rewards are claimed and deployed in two wallet transactions: the staker claims
+from their signer-manager, then deposits into the venue they pick. Most venues
+(Zest v2, Hermetica hBTC) only accept deposits sent by the depositor's own
+wallet, so a single atomic transaction can't reach them. The Reward Router in
+`contracts/` is the optional one-transaction path for venues that accept
+contract callers.
 
 ## WSL
 

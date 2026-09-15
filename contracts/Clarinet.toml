@@ -5,6 +5,18 @@ authors = []
 telemetry = false
 cache_dir = "./.cache"
 
+[[project.requirements]]
+contract_id = "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.stacking-dao-core-stbtc-v1"
+
+[[project.requirements]]
+contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2"
+
+[[project.requirements]]
+contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1"
+
+[[project.requirements]]
+contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2"
+
 # [contracts.counter]
 # path = "contracts/counter.clar"
 # epoch = "latest"
@@ -19,11 +31,26 @@ cache_dir = "./.cache"
 
 [repl.analysis]
 passes = ["check_checker"]
-check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = false }
+check_checker = { trusted_sender = false, trusted_caller = true, callee_filter = false }
 
 [contracts]
 
-[contracts.kessel]
-path = "contracts/kessel.clar"
-clarity_version = 6
+[contracts.kessel-traits]
+path = "contracts/kessel-traits.clar"
+clarity_version = 4
+epoch = "latest"
+
+[contracts.reward-router]
+path = "contracts/reward-router.clar"
+clarity_version = 4
+epoch = "latest"
+
+[contracts.stbtc-target]
+path = "contracts/stbtc-target.clar"
+clarity_version = 4
+epoch = "latest"
+
+[contracts.bitflow-sbtc-stx-target]
+path = "contracts/bitflow-sbtc-stx-target.clar"
+clarity_version = 4
 epoch = "latest"
