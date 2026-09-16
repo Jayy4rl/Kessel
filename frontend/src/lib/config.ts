@@ -4,6 +4,11 @@
 export const SBTC_TOKEN = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token";
 export const SBTC_ASSET_NAME = "sbtc-token";
 
+export const HIRO_API = "https://api.hiro.so";
+
+// Bond and staker reward reads that no API exposes per cycle.
+export const POX_5 = "SP000000000000000000002Q6VF78.pox-5";
+
 export const BITFLOW_APP_API = "https://bff.bitflowapis.finance/api/app/v1";
 export const BITFLOW_QUOTES_API = "https://bff.bitflowapis.finance/api/quotes/v1";
 
