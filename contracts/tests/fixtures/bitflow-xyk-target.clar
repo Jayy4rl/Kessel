@@ -1,11 +1,9 @@
-;; title: bitflow-sbtc-stx-target
-;; summary: Deploy target that adds sBTC/STX liquidity on Bitflow XYK.
-;; description:
-;;   sBTC is the pool's x-token, so `amount` is the x-amount; xyk-core pulls the
-;;   matching STX (y-amount) from `tx-sender` and mints LP tokens to
-;;   `tx-sender`. The router caps that STX with its `max-stx` allowance.
-;;   `min-out` is Bitflow's `min-dlp` and must be non-zero.
-
+;; Deploy target for Bitflow's legacy XYK sBTC/STX pool.
+;;
+;; Test fixture only: Bitflow's liquidity and fees have moved to HODLMM, and
+;; this pool is near-empty. It is kept because it is a real protocol the
+;; router can be driven end-to-end against on forked mainnet state; it is not
+;; part of the deployable contract set and must not be registered as a target.
 (impl-trait .kessel-traits.deploy-target-trait)
 
 (define-public (deploy

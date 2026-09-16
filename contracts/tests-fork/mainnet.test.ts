@@ -29,7 +29,9 @@ const CONTRACTS = [
   ["kessel-traits", "contracts/kessel-traits.clar"],
   ["reward-router", "contracts/reward-router.clar"],
   ["stbtc-target", "contracts/stbtc-target.clar"],
-  ["bitflow-sbtc-stx-target", "contracts/bitflow-sbtc-stx-target.clar"],
+  // Legacy XYK pool, kept as a fixture: a real protocol to drive the router
+  // against end-to-end. Production deposits go to HODLMM from the frontend.
+  ["bitflow-xyk-target", "tests/fixtures/bitflow-xyk-target.clar"],
   ["mock-manager", "tests/fixtures/mock-manager.clar"],
 ] as const;
 
@@ -92,16 +94,16 @@ beforeAll(async () => {
   simnet.transferSTX(STAKER_STX, STAKER, FUNDER);
 
   admin("set-source", [ownCV("mock-manager"), Cl.bool(true)]);
-  admin("set-target", [Cl.stringAscii("bitflow"), ownCV("bitflow-sbtc-stx-target"), Cl.bool(true)]);
+  admin("set-target", [Cl.stringAscii("bitflow"), ownCV("bitflow-xyk-target"), Cl.bool(true)]);
 });
 
 describe("adapters against mainnet state", () => {
-  it("bitflow-sbtc-stx-target adds liquidity and mints LP tokens to the caller", () => {
+  it("bitflow-xyk-target adds liquidity and mints LP tokens to the caller", () => {
     const sbtcBefore = sbtcBalance(STAKER);
     const lpBefore = lpBalance(STAKER);
 
     const { result } = simnet.callPublicFn(
-      own("bitflow-sbtc-stx-target"),
+      own("bitflow-xyk-target"),
       "deploy",
       [Cl.uint(AMOUNT), Cl.uint(1)],
       STAKER,
@@ -149,7 +151,7 @@ describe("reward-router against mainnet state", () => {
         Cl.uint(10),
         ownCV("mock-manager"),
         Cl.stringAscii("bitflow"),
-        ownCV("bitflow-sbtc-stx-target"),
+        ownCV("bitflow-xyk-target"),
         Cl.uint(AMOUNT),
         Cl.uint(1),
         Cl.uint(maxStx),

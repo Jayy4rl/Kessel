@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   Cl,
+  ClarityType,
   type ClarityValue,
   type ResponseOkCV,
   type TupleCV,
@@ -26,6 +27,7 @@ const FIXTURES = [
   "partial-target",
   "stx-pair-target",
   "router-proxy",
+  "mock-native-manager",
 ] as const;
 type Fixture = (typeof FIXTURES)[number];
 
@@ -379,5 +381,86 @@ describe("preview-claim-and-deploy", () => {
     const unknown = previewFields("nope");
     expect(unknown.target).toStrictEqual(Cl.none());
     expect(unknown.executable).toStrictEqual(Cl.bool(false));
+  });
+});
+
+describe("native-pool-source", () => {
+  const NATIVE_POOL = "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.native-pool-signer-manager";
+  const ERR_STAKER_MISMATCH = 200;
+  // The deployed adapter names one manager, so tests point a copy of it at
+  // the mock manager instead.
+  const PATCHED = "patched-native-pool-source";
+
+  beforeEach(() => {
+    const source = readFileSync(
+      join(process.cwd(), "contracts", "native-pool-source.clar"),
+      "utf8",
+    ).replace(NATIVE_POOL, contract("mock-native-manager"));
+    simnet.deployContract(PATCHED, source, { clarityVersion: 4 }, deployer);
+    expect(
+      call("set-source", [Cl.contractPrincipal(deployer, PATCHED), Cl.bool(true)]).result,
+    ).toBeOk(Cl.bool(true));
+    fundSbtc(contract("mock-native-manager"), 1_000_000);
+  });
+
+  const oweNative = (amount: number) =>
+    simnet.callPublicFn(
+      "mock-native-manager",
+      "set-owed",
+      [Cl.principal(staker), Cl.uint(amount)],
+      deployer,
+    );
+
+  it("routes a claim from a manager that pays tx-sender", () => {
+    oweNative(REWARD);
+
+    const { result } = call(
+      "claim-and-deploy",
+      [
+        Cl.uint(1),
+        Cl.uint(10),
+        Cl.contractPrincipal(deployer, PATCHED),
+        Cl.stringAscii("mock"),
+        contractCV("mock-target"),
+        Cl.uint(REWARD),
+        Cl.uint(0),
+        Cl.uint(0),
+      ],
+      staker,
+    );
+
+    expect(result).toBeOk(
+      Cl.tuple({
+        claimed: Cl.uint(REWARD),
+        deployed: Cl.uint(REWARD),
+        received: Cl.uint(REWARD),
+        target: Cl.stringAscii("mock"),
+      }),
+    );
+    expect(sbtcBalance(contract("mock-target"))).toBe(BigInt(REWARD));
+  });
+
+  it("refuses to claim for anyone but the caller", () => {
+    oweNative(REWARD);
+
+    const { result } = simnet.callPublicFn(
+      `${deployer}.${PATCHED}`,
+      "claim-staker-rewards",
+      [Cl.principal(outsider), Cl.uint(10), Cl.some(Cl.uint(1))],
+      staker,
+    );
+
+    expect(result).toBeErr(Cl.uint(ERR_STAKER_MISMATCH));
+  });
+
+  it("passes the real manager's error through when there is nothing to claim", () => {
+    const { result } = simnet.callPublicFn(
+      "native-pool-source",
+      "claim-staker-rewards",
+      [Cl.principal(staker), Cl.uint(10), Cl.some(Cl.uint(1))],
+      staker,
+    );
+
+    expect(result).toHaveClarityType(ClarityType.ResponseErr);
   });
 });

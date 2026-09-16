@@ -15,7 +15,6 @@ callers.
 | [`kessel-traits`](contracts/kessel-traits.clar) | `reward-source-trait` (signer-manager claim) and `deploy-target-trait` (DeFi destination) |
 | [`reward-router`](contracts/reward-router.clar) | `claim-and-deploy`, target/source registry, pause, two-step ownership |
 | [`stbtc-target`](contracts/stbtc-target.clar) | StackingDAO: sBTC → stBTC via `stacking-dao-core-stbtc-v1.deposit` |
-| [`bitflow-sbtc-stx-target`](contracts/bitflow-sbtc-stx-target.clar) | Bitflow: sBTC/STX LP via `xyk-core-v-1-2.add-liquidity` |
 
 ## How `claim-and-deploy` works
 
@@ -47,12 +46,13 @@ and `max-stx` in uSTX.
 | Protocol | Status |
 |---|---|
 | Signer-managers on the stacks-core reference template | Plug in directly as a source — same `claim-staker-rewards` signature |
-| Other signer-managers (e.g. `native-pool-signer-manager`, `fastpool-max500`) | Need a thin adapter implementing `reward-source-trait` |
+| `native-pool-signer-manager` | [`native-pool-source`](contracts/native-pool-source.clar) — its claim takes no staker argument and pays `tx-sender` |
+| Other signer-managers | Need a thin adapter implementing `reward-source-trait`, one per manager (copy `native-pool-source` and change the manager) |
 | Stakers with an L1 BTC payout address | Not routable: the manager pays BTC on L1, so the router sees 0 sBTC and reverts |
 | Stakers holding their bond through a contract (e.g. Xverse `sbtc-bond-staker-v1-1`) | Not routable: `claim-and-deploy` only runs when the staker calls it directly |
 | StackingDAO stBTC | `stbtc-target` — **unusable while StackingDAO has deposits shut down** (`shutdown-deposits = true` on mainnet; `deposit` returns `u25001`). Register it disabled until they reopen |
-| Bitflow sBTC/STX LP | `bitflow-sbtc-stx-target` (STX side capped by `max-stx`) — verified against forked mainnet state, but it targets the **legacy XYK pool**. Bitflow's liquidity and fees are in HODLMM pools, which the frontend deposits into directly |
-| Bitflow HODLMM | No router target yet. The core pulls from `tx-sender`, so one is possible, but it needs bin placement and fee-cap parameters `deploy-target-trait` doesn't carry |
+| Bitflow HODLMM | No router target. The core pulls from `tx-sender`, so one is possible, but it needs bin placement and fee-cap parameters `deploy-target-trait` doesn't carry. The frontend deposits there directly |
+| Bitflow XYK (legacy pool) | Not deployable: [`tests/fixtures/bitflow-xyk-target.clar`](tests/fixtures/bitflow-xyk-target.clar) exists only so the fork tests can drive the router end-to-end against a real protocol |
 | Zest v2 sBTC supply | Wallet only: `v0-vault-sbtc.deposit` debits `contract-caller`. (The v1 `borrow-helper` also rejects contract callers.) |
 | Hermetica hBTC | Wallet only: `vault-hbtc-v1-2.deposit` debits and credits `contract-caller` |
 

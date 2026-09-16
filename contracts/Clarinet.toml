@@ -9,13 +9,7 @@ cache_dir = "./.cache"
 contract_id = "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.stacking-dao-core-stbtc-v1"
 
 [[project.requirements]]
-contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2"
-
-[[project.requirements]]
-contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1"
-
-[[project.requirements]]
-contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2"
+contract_id = "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.native-pool-signer-manager"
 
 # [contracts.counter]
 # path = "contracts/counter.clar"
@@ -50,7 +44,7 @@ path = "contracts/stbtc-target.clar"
 clarity_version = 4
 epoch = "latest"
 
-[contracts.bitflow-sbtc-stx-target]
-path = "contracts/bitflow-sbtc-stx-target.clar"
+[contracts.native-pool-source]
+path = "contracts/native-pool-source.clar"
 clarity_version = 4
 epoch = "latest"
