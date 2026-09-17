@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		// Clarinet expects LF line endings in .clar files.
+		"files.eol": "\n",
+		"terminal.integrated.defaultProfile.windows": "Ubuntu-24.04 (WSL)"
+	},
+	"extensions": {
+		"recommendations": [
+			"hirosystems.clarity-lsp",
+			"ms-vscode-remote.remote-wsl"
+		]
+	}
+}

@@ -1,0 +1,23 @@
+# Environment
+.env
+.env.local
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+
+# Clarinet (contracts/.gitignore also covers settings/Mainnet.toml, settings/Testnet.toml, .cache)
+coverage/
+lcov.info
+costs-reports.json
+
+# Frontend
+dist/
+.vite/
+*.local
+dev.log
